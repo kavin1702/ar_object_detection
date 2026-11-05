@@ -3,8 +3,9 @@ using UnityEngine;
 namespace CADInspection.Visualization
 {
     /// <summary>
-    /// Renders the precision CAD wireframe overlay, optional imported CAD mesh,
-    /// and 3D dimension callouts directly above the registered physical notebook (FR-09, FR-11).
+    /// Renders the precision CAD wireframe overlay and 3D dimension callouts
+    /// strictly parented to the ARAnchor so it never drifts in physical space.
+    /// Wireframe-only (completely transparent interior) so the real object is fully visible.
     /// </summary>
     public class CADWireframeOverlay : MonoBehaviour
     {
@@ -13,22 +14,12 @@ namespace CADInspection.Visualization
         [SerializeField] private float m_WidthMm = 154f;
         [SerializeField] private float m_ThicknessMm = 50f;
 
-        [Header("Optional Imported CAD Model")]
-        [Tooltip("Optional 3D model prefab (FBX/OBJ) exported from CAD software. If unassigned, precision CAD wireframe is rendered.")]
-        [SerializeField] private GameObject m_CadModelPrefab;
-
-        [Header("Styling")]
-        [SerializeField] private Color m_WireframeColor = new Color(0.15f, 1f, 0.35f, 1f); // Glowing AR Green
-        [SerializeField] private float m_WireframeLineWidth = 0.003f; // 3mm line
+        [Header("Wireframe Styling")]
+        [SerializeField] private Color m_WireframeColor = new Color(0.15f, 1f, 0.4f, 1f); // Vibrant AR Green
+        [SerializeField] private float m_WireframeLineWidth = 0.0035f; // 3.5mm thick line
 
         private GameObject m_OverlayRoot;
         private Material m_WireframeMaterial;
-
-        public GameObject CadModelPrefab
-        {
-            get => m_CadModelPrefab;
-            set => m_CadModelPrefab = value;
-        }
 
         private void Awake()
         {
@@ -37,38 +28,47 @@ namespace CADInspection.Visualization
 
         private void SetupMaterial()
         {
-            Shader unlit = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlit == null) unlit = Shader.Find("Hidden/Internal-Colored");
-            if (unlit == null) unlit = Shader.Find("Sprites/Default");
+            Shader unlit = Shader.Find("Universal Render Pipeline/Unlit") 
+                        ?? Shader.Find("Hidden/Internal-Colored") 
+                        ?? Shader.Find("Sprites/Default");
 
             m_WireframeMaterial = new Material(unlit);
             m_WireframeMaterial.color = m_WireframeColor;
-            m_WireframeMaterial.SetColor("_BaseColor", m_WireframeColor);
+            if (m_WireframeMaterial.HasProperty("_BaseColor"))
+                m_WireframeMaterial.SetColor("_BaseColor", m_WireframeColor);
         }
 
         public void DisplayOverlay(Pose pose, float measuredLengthMm, float measuredWidthMm, float measuredDepthMm)
         {
-            if (m_OverlayRoot != null)
-            {
-                Destroy(m_OverlayRoot);
-            }
+            DisplayOverlay(null, pose, measuredLengthMm, measuredWidthMm, measuredDepthMm);
+        }
+
+        /// <summary>
+        /// Displays the wireframe overlay parented to the ARAnchor so it stays rigidly anchored to the real object.
+        /// </summary>
+        public void DisplayOverlay(Transform anchorTransform, Pose pose, float measuredLengthMm, float measuredWidthMm, float measuredDepthMm)
+        {
+            HideOverlay();
 
             m_OverlayRoot = new GameObject("CAD_Wireframe_Root");
-            m_OverlayRoot.transform.position = pose.position;
-            m_OverlayRoot.transform.rotation = pose.rotation;
-
-            // 1. If user assigned an imported CAD Model (FBX/OBJ), instantiate it
-            if (m_CadModelPrefab != null)
+            
+            // Parent to ARAnchor so ARCore keeps it locked to the physical tabletop
+            if (anchorTransform != null)
             {
-                GameObject modelInstance = Instantiate(m_CadModelPrefab, m_OverlayRoot.transform);
-                modelInstance.transform.localPosition = new Vector3(0f, (m_ThicknessMm / 1000f) * 0.5f, 0f);
-                modelInstance.transform.localRotation = Quaternion.identity;
+                m_OverlayRoot.transform.SetParent(anchorTransform, false);
+                m_OverlayRoot.transform.localPosition = Vector3.zero;
+                m_OverlayRoot.transform.localRotation = Quaternion.identity;
+            }
+            else
+            {
+                m_OverlayRoot.transform.position = pose.position;
+                m_OverlayRoot.transform.rotation = pose.rotation;
             }
 
-            // 2. Build precision CAD wireframe cage
+            // Build pure wireframe cage (no solid mesh)
             BuildWireframeMesh();
 
-            // 3. Build 3D dimension callouts along edges
+            // Build 3D floating dimension badges on edges
             BuildDimensionCallouts(measuredLengthMm, measuredWidthMm, measuredDepthMm);
         }
 
@@ -101,9 +101,9 @@ namespace CADInspection.Visualization
 
             int[,] edges = new int[12, 2]
             {
-                {0,1}, {1,2}, {2,3}, {3,0},
-                {4,5}, {5,6}, {6,7}, {7,4},
-                {0,4}, {1,5}, {2,6}, {3,7}
+                {0,1}, {1,2}, {2,3}, {3,0}, // Bottom rectangle
+                {4,5}, {5,6}, {6,7}, {7,4}, // Top rectangle
+                {0,4}, {1,5}, {2,6}, {3,7}  // 4 Vertical corner pillars
             };
 
             for (int i = 0; i < 12; i++)
@@ -130,16 +130,16 @@ namespace CADInspection.Visualization
             float hy = (m_ThicknessMm / 1000f);
             float hz = (m_LengthMm / 1000f) * 0.5f;
 
-            // 1. Length Callout (Along Left Edge: Z axis)
-            Vector3 lengthPos = new Vector3(-hx - 0.035f, hy * 0.5f, 0f);
+            // 1. Length Callout (Along Side: Z axis)
+            Vector3 lengthPos = new Vector3(-hx - 0.045f, hy * 0.5f, 0f);
             CreateFloatingBadge($"Length (L)\n{lengthMm:F1} mm", lengthPos);
 
-            // 2. Width Callout (Along Front Edge: X axis)
-            Vector3 widthPos = new Vector3(0f, hy + 0.035f, hz + 0.015f);
+            // 2. Width Callout (Along Top Front: X axis)
+            Vector3 widthPos = new Vector3(0f, hy + 0.04f, hz + 0.02f);
             CreateFloatingBadge($"Width (W)\n{widthMm:F1} mm", widthPos);
 
-            // 3. Depth Callout (Along Corner Pillar: Y axis)
-            Vector3 depthPos = new Vector3(hx + 0.035f, hy * 0.5f, hz);
+            // 3. Depth Callout (Along Vertical Corner: Y axis)
+            Vector3 depthPos = new Vector3(hx + 0.045f, hy * 0.5f, hz);
             CreateFloatingBadge($"Depth (T)\n{depthMm:F1} mm", depthPos);
         }
 
@@ -149,10 +149,8 @@ namespace CADInspection.Visualization
             badgeObj.transform.SetParent(m_OverlayRoot.transform, false);
             badgeObj.transform.localPosition = localPos;
 
-            // Billboard component
             badgeObj.AddComponent<BillboardLookAtCamera>();
 
-            // 3D Text
             TextMesh tm = badgeObj.AddComponent<TextMesh>();
             tm.text = text;
             tm.fontSize = 32;
@@ -166,7 +164,7 @@ namespace CADInspection.Visualization
     }
 
     /// <summary>
-    /// Keeps 3D floating dimension labels facing the AR camera.
+    /// Smoothly billboards floating 3D text toward the camera.
     /// </summary>
     public class BillboardLookAtCamera : MonoBehaviour
     {
@@ -174,7 +172,7 @@ namespace CADInspection.Visualization
 
         private void Start()
         {
-            m_Camera = Camera.main != null ? Camera.main : FindFirstObjectByType<Camera>();
+            m_Camera = Camera.main ?? FindFirstObjectByType<Camera>();
         }
 
         private void LateUpdate()

@@ -24,18 +24,33 @@ namespace CADInspection.Editor
     {
         private string m_ModelName = "Engineering Notebook";
         private Texture2D m_MarkerImage;
-        private float m_LengthMm = 230f;
-        private float m_WidthMm = 154f;
-        private float m_ThicknessMm = 50f;
+        private float m_LengthMm = 210f;
+        private float m_WidthMm = 148f;
+        private float m_ThicknessMm = 20f;
 
         private Color m_OutlineColor = new Color(0.12f, 0.95f, 0.42f, 1f); // Vibrant AR Green
         private float m_LineWidthMm = 3.5f;
         private bool m_ShowCornerNodes = true;
 
-        private float m_DimensionHeightOffsetMm = 40f;
-        private DimensionDisplayFormat m_DimensionFormat = DimensionDisplayFormat.CompactWithLabels;
+        private float m_CalloutOffsetMm = 25f;
+        private int m_Decimals = 1;
         private Color m_DimensionTextColor = Color.white;
-        private bool m_ShowLeaderLine = true;
+        private bool m_ShowDimensionLines = true;
+
+        // Auto-detect the note by its cover colour
+        private bool m_AutoDetectByColor = true;
+        private Color m_CoverColor = new Color(0.06f, 0.66f, 0.74f, 1f);
+        private float m_HueTolerance = 18f;
+        private bool m_ShowDetectionDebug;
+        private bool m_FlipCameraImage;
+        private bool m_RefineAfterLock = true;
+        private Texture2D m_CoverColorFromImage;
+
+        // ARCore marker quality check (arcoreimg) for the selected image
+        private bool m_QualityChecked;
+        private int m_QualityScore = -1;
+        private string m_QualityMessage = "";
+        private Texture2D m_QualityCheckedImage;
         private bool m_ShowBackplate = true;
         private GameObject m_OptionalModelPrefab;
 
@@ -71,10 +86,17 @@ namespace CADInspection.Editor
                 m_OutlineColor = profile.outlineColor;
                 m_LineWidthMm = profile.lineWidthMm;
                 m_ShowCornerNodes = profile.showCornerNodes;
-                m_DimensionHeightOffsetMm = profile.dimensionHeightOffsetMm;
-                m_DimensionFormat = profile.dimensionFormat;
+                m_CalloutOffsetMm = profile.calloutOffsetMm;
+                m_Decimals = profile.decimals;
                 m_DimensionTextColor = profile.dimensionTextColor;
-                m_ShowLeaderLine = profile.showLeaderLine;
+                m_ShowDimensionLines = profile.showDimensionLines;
+                m_AutoDetectByColor = profile.autoDetectByColor;
+                m_CoverColor = profile.coverColor;
+                m_HueTolerance = profile.colorHueTolerance;
+                m_ShowDetectionDebug = profile.showDetectionDebug;
+                m_FlipCameraImage = profile.flipCameraImageVertically;
+                m_RefineAfterLock = profile.refineAfterLock;
+                m_CoverColorFromImage = profile.markerImage;
                 m_ShowBackplate = profile.showBackplate;
                 m_OptionalModelPrefab = profile.optionalModelPrefab;
             }
@@ -97,7 +119,7 @@ namespace CADInspection.Editor
             // Banner Header
             EditorGUILayout.BeginVertical(m_HeaderStyle);
             EditorGUILayout.LabelField("Note AR Setup Tool", m_TitleStyle);
-            EditorGUILayout.LabelField("Assign Note Image & Physical Dimensions -> Project 3D Outline with Floating Dimensions", m_SubTitleStyle);
+            EditorGUILayout.LabelField("Assign Note Image & Physical Dimensions -> 3D Outline with Width / Length / Depth Callouts", m_SubTitleStyle);
             EditorGUILayout.EndVertical();
 
             EditorGUILayout.Space(10);
@@ -138,6 +160,87 @@ namespace CADInspection.Editor
                 Rect previewRect = GUILayoutUtility.GetRect(160, 160, GUILayout.ExpandWidth(true));
                 GUI.DrawTexture(previewRect, m_MarkerImage, ScaleMode.ScaleToFit);
                 EditorGUILayout.LabelField($"Image: {m_MarkerImage.name} ({m_MarkerImage.width} × {m_MarkerImage.height} px)", EditorStyles.centeredGreyMiniLabel);
+
+                // Orientation check: the image's long side should match the note's long side (length).
+                bool imagePortrait = m_MarkerImage.height >= m_MarkerImage.width;
+                bool notePortrait = m_LengthMm >= m_WidthMm;
+                if (imagePortrait != notePortrait)
+                {
+                    EditorGUILayout.HelpBox("The image looks rotated: its long side does not match the note's Length. " +
+                        "Phone photos can carry a rotation tag that Unity ignores. Rotate the image file so the cover is upright.",
+                        MessageType.Warning);
+                }
+
+                EditorGUILayout.Space(4);
+                if (m_QualityCheckedImage != m_MarkerImage)
+                {
+                    m_QualityChecked = false;
+                }
+
+                if (GUILayout.Button("Check Marker Quality (ARCore arcoreimg)", GUILayout.Height(24)))
+                {
+                    m_QualityScore = EvaluateMarkerQuality(m_MarkerImage, out m_QualityMessage);
+                    m_QualityChecked = true;
+                    m_QualityCheckedImage = m_MarkerImage;
+                }
+
+                if (m_QualityChecked)
+                {
+                    if (m_QualityScore < 0)
+                    {
+                        EditorGUILayout.HelpBox("Quality check failed: " + m_QualityMessage, MessageType.Warning);
+                    }
+                    else if (m_QualityScore >= 75)
+                    {
+                        EditorGUILayout.HelpBox($"ARCore score {m_QualityScore}/100. {m_QualityMessage}", MessageType.Info);
+                    }
+                    else
+                    {
+                        EditorGUILayout.HelpBox($"ARCore score {m_QualityScore}/100 (75+ recommended). Too little detail for ARCore image " +
+                            "tracking, so the app finds the note by its cover colour instead (below), or you align the box and tap LOCK.",
+                            MessageType.Warning);
+                    }
+                }
+
+                // Auto-detect by cover colour
+                EditorGUILayout.Space(8);
+                EditorGUILayout.LabelField("Auto-Detect Note by Cover Colour", EditorStyles.miniBoldLabel);
+                m_AutoDetectByColor = EditorGUILayout.Toggle(new GUIContent("Enable Auto-Detect",
+                    "The app looks for the cover colour in the camera view and snaps the green box onto the notebook"), m_AutoDetectByColor);
+
+                if (m_CoverColorFromImage != m_MarkerImage)
+                {
+                    m_CoverColor = ComputeCoverColor(m_MarkerImage, m_CoverColor);
+                    m_CoverColorFromImage = m_MarkerImage;
+                }
+
+                using (new EditorGUI.DisabledScope(!m_AutoDetectByColor))
+                {
+                    using (new EditorGUI.DisabledScope(true))
+                    {
+                        EditorGUILayout.ColorField(new GUIContent("Cover Colour (from image)"), m_CoverColor, false, false, false);
+                    }
+                    m_HueTolerance = EditorGUILayout.Slider(new GUIContent("Colour Tolerance (°)",
+                        "Raise if the notebook is not found under warm/dim light; lower if the table is a similar colour"), m_HueTolerance, 4f, 60f);
+                    m_ShowDetectionDebug = EditorGUILayout.Toggle(new GUIContent("Show Debug Thumbnail In App",
+                        "Shows what the detector sees (magenta = cover colour) in the top-left corner of the app"), m_ShowDetectionDebug);
+                    m_FlipCameraImage = EditorGUILayout.Toggle(new GUIContent("Flip Camera Image (debug)",
+                        "Only if the debug thumbnail is upside down compared with the screen"), m_FlipCameraImage);
+                    m_RefineAfterLock = EditorGUILayout.Toggle(new GUIContent("Keep Outline On Note After LOCK",
+                        "After LOCK, keep checking the notebook in view and pull the outline back onto it, so AR tracking " +
+                        "drift does not make it slide off when you move the phone"), m_RefineAfterLock);
+                }
+
+                Color.RGBToHSV(m_CoverColor, out float coverH, out float coverS, out _);
+                if (m_AutoDetectByColor && coverS < 0.25f)
+                {
+                    EditorGUILayout.HelpBox("The cover colour is grey/white/black (low saturation): colour detection works best with a coloured cover " +
+                        "on a table of a different colour.", MessageType.Warning);
+                }
+                else if (m_AutoDetectByColor)
+                {
+                    EditorGUILayout.HelpBox($"Cover hue {coverH * 360f:F0}°. Works best when the table is a clearly different colour.", MessageType.None);
+                }
             }
             EditorGUILayout.EndVertical();
 
@@ -161,7 +264,7 @@ namespace CADInspection.Editor
 
             // 4. Visual Outline & Dimension Styling Section
             EditorGUILayout.BeginVertical(m_CardStyle);
-            EditorGUILayout.LabelField("4. 3D Outline & Floating Dimension Styling", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("4. 3D Outline & Dimension Callout Styling", EditorStyles.boldLabel);
             EditorGUILayout.Space(4);
 
             m_OutlineColor = EditorGUILayout.ColorField("Outline Color", m_OutlineColor);
@@ -169,12 +272,12 @@ namespace CADInspection.Editor
             m_ShowCornerNodes = EditorGUILayout.Toggle("Corner Accent Nodes", m_ShowCornerNodes);
 
             EditorGUILayout.Space(6);
-            EditorGUILayout.LabelField("Dimension Floating Above Model:", EditorStyles.miniBoldLabel);
-            m_DimensionHeightOffsetMm = EditorGUILayout.Slider("Height Above Model (mm)", m_DimensionHeightOffsetMm, 15f, 150f);
-            m_DimensionFormat = (DimensionDisplayFormat)EditorGUILayout.EnumPopup("Display Format", m_DimensionFormat);
-            m_DimensionTextColor = EditorGUILayout.ColorField("Text Color", m_DimensionTextColor);
-            m_ShowLeaderLine = EditorGUILayout.Toggle("Show Leader Line", m_ShowLeaderLine);
-            m_ShowBackplate = EditorGUILayout.Toggle("Show Dark Backplate", m_ShowBackplate);
+            EditorGUILayout.LabelField("Edge Callouts (Width (W), Length (L), Depth (T)):", EditorStyles.miniBoldLabel);
+            m_CalloutOffsetMm = EditorGUILayout.Slider("Arrow Offset From Edge (mm)", m_CalloutOffsetMm, 5f, 80f);
+            m_Decimals = EditorGUILayout.IntSlider("Decimals (148.0 mm = 1)", m_Decimals, 0, 2);
+            m_DimensionTextColor = EditorGUILayout.ColorField("Text & Arrow Color", m_DimensionTextColor);
+            m_ShowDimensionLines = EditorGUILayout.Toggle("Show Arrow Lines", m_ShowDimensionLines);
+            m_ShowBackplate = EditorGUILayout.Toggle("Show Dark Label Plate", m_ShowBackplate);
 
             EditorGUILayout.Space(6);
             m_OptionalModelPrefab = (GameObject)EditorGUILayout.ObjectField("Optional 3D Model Prefab", m_OptionalModelPrefab, typeof(GameObject), false);
@@ -359,32 +462,7 @@ namespace CADInspection.Editor
                 Directory.CreateDirectory(settingsDir);
             }
 
-            // 1. Build or Update XRReferenceImageLibrary
-            string libraryPath = $"{settingsDir}/NoteMarkerLibrary.asset";
-            var library = AssetDatabase.LoadAssetAtPath<XRReferenceImageLibrary>(libraryPath);
-            if (library == null)
-            {
-                library = ScriptableObject.CreateInstance<XRReferenceImageLibrary>();
-                AssetDatabase.CreateAsset(library, libraryPath);
-            }
-
-            // Populate library with image & physical dimensions
-            var serializedLib = new SerializedObject(library);
-            var imagesProp = serializedLib.FindProperty("m_Images");
-            imagesProp.ClearArray();
-            imagesProp.InsertArrayElementAtIndex(0);
-
-            var entry = imagesProp.GetArrayElementAtIndex(0);
-            entry.FindPropertyRelative("m_Name").stringValue = m_ModelName;
-            entry.FindPropertyRelative("m_Texture").objectReferenceValue = m_MarkerImage;
-            entry.FindPropertyRelative("m_SpecifySize").boolValue = true;
-            // Physical size in meters (X = width, Y = length)
-            entry.FindPropertyRelative("m_Size").vector2Value = new Vector2(m_WidthMm / 1000f, m_LengthMm / 1000f);
-
-            serializedLib.ApplyModifiedProperties();
-            EditorUtility.SetDirty(library);
-
-            // 2. Build or Update NoteMarkerProfile
+            // 1. Build or Update NoteMarkerProfile
             string profilePath = $"{settingsDir}/CurrentNoteMarkerProfile.asset";
             var profile = AssetDatabase.LoadAssetAtPath<NoteMarkerProfile>(profilePath);
             if (profile == null)
@@ -395,22 +473,37 @@ namespace CADInspection.Editor
 
             profile.modelName = m_ModelName;
             profile.markerImage = m_MarkerImage;
-            profile.imageLibrary = library;
             profile.lengthMm = m_LengthMm;
             profile.widthMm = m_WidthMm;
             profile.thicknessMm = m_ThicknessMm;
             profile.outlineColor = m_OutlineColor;
             profile.lineWidthMm = m_LineWidthMm;
             profile.showCornerNodes = m_ShowCornerNodes;
-            profile.dimensionHeightOffsetMm = m_DimensionHeightOffsetMm;
-            profile.dimensionFormat = m_DimensionFormat;
+            profile.calloutOffsetMm = m_CalloutOffsetMm;
+            profile.decimals = m_Decimals;
             profile.dimensionTextColor = m_DimensionTextColor;
-            profile.showLeaderLine = m_ShowLeaderLine;
+            profile.showDimensionLines = m_ShowDimensionLines;
+            profile.autoDetectByColor = m_AutoDetectByColor;
+            profile.coverColor = ComputeCoverColor(m_MarkerImage, m_CoverColor);
+            profile.colorHueTolerance = m_HueTolerance;
+            profile.showDetectionDebug = m_ShowDetectionDebug;
+            profile.flipCameraImageVertically = m_FlipCameraImage;
+            profile.refineAfterLock = m_RefineAfterLock;
             profile.showBackplate = m_ShowBackplate;
             profile.optionalModelPrefab = m_OptionalModelPrefab;
 
             EditorUtility.SetDirty(profile);
-            AssetDatabase.SaveAssets();
+            // Save only this tool's assets. AssetDatabase.SaveAssets() writes every dirty asset in memory,
+            // including read-only package assets (e.g. AR Foundation's SimulationLitGray.mat, which XR Simulation
+            // marks dirty in Play mode), which triggers Unity's "immutable packages were unexpectedly altered" warning.
+            AssetDatabase.SaveAssetIfDirty(profile);
+
+            // 2. Build the image library only if ARCore can use the cover
+            var library = SyncImageLibrary(profile, out int score, out string libraryNote);
+            m_QualityScore = score;
+            m_QualityMessage = libraryNote;
+            m_QualityChecked = true;
+            m_QualityCheckedImage = m_MarkerImage;
 
             // 3. Configure the active AR Scene
             ConfigureScene(profile, library);
@@ -421,14 +514,238 @@ namespace CADInspection.Editor
                 $"• Dimensions: {m_LengthMm:F0} × {m_WidthMm:F0} × {m_ThicknessMm:F0} mm\n" +
                 $"• Real Size in AR: {(m_LengthMm / 10f):F1} cm × {(m_WidthMm / 10f):F1} cm × {(m_ThicknessMm / 10f):F1} cm\n" +
                 $"• Marker Image: {m_MarkerImage.name}\n" +
-                $"• Floating Dimension: Directly above model ({m_DimensionHeightOffsetMm:F0} mm offset)\n" +
+                $"• Dimension Callouts: Width / Length / Depth on the edges ({m_CalloutOffsetMm:F0} mm offset)\n" +
                 $"• Rotate & Lock Controls: Active\n\n" +
+                libraryNote + "\n\n" +
                 "The AR scene and app are now fully configured!",
                 "Great!");
         }
 
+        public const string LibraryPath = "Assets/_Project/Settings/NoteMarkerLibrary.asset";
+
+        /// <summary>
+        /// Dominant cover colour of the marker image (works for a cropped cover or a photo of the note on a table).
+        /// Reads pixels through a RenderTexture, so the texture does not need to be readable.
+        /// </summary>
+        public static Color ComputeCoverColor(Texture2D image, Color fallback)
+        {
+            if (image == null) return fallback;
+
+            int w = 128;
+            int h = Mathf.Clamp(Mathf.RoundToInt(128f * image.height / Mathf.Max(1, image.width)), 16, 512);
+            var rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+            var previous = RenderTexture.active;
+            var readback = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            try
+            {
+                Graphics.Blit(image, rt);
+                RenderTexture.active = rt;
+                readback.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                readback.Apply();
+                return NoteColorBlobDetector.DominantCoverColor(readback.GetPixels32(), w, h);
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(rt);
+                DestroyImmediate(readback);
+            }
+        }
+
+        /// <summary>
+        /// Creates/updates the reference image library from the profile's marker image, but only when ARCore
+        /// can actually use it. ARCore's build step fails ("Failed to get enough keypoints") for plain covers
+        /// and also for an empty library ("No valid input image found"), and a library without ARCore data
+        /// falls back to a broken loading path on the phone. So for an unusable cover the library asset is
+        /// removed and the app runs in Align &amp; Lock mode only. Returns the library, or null when removed.
+        /// </summary>
+        public static XRReferenceImageLibrary SyncImageLibrary(NoteMarkerProfile profile, out int score, out string note)
+        {
+            score = -1;
+            note = "";
+            if (profile == null) return null;
+
+            Texture2D image = profile.markerImage;
+            string qualityMessage = "";
+            if (image != null)
+            {
+                score = EvaluateMarkerQuality(image, out qualityMessage);
+            }
+
+            // score 0 = arcoreimg cannot add the image at all; -1 = could not evaluate (keep the image, ARCore decides).
+            bool usable = image != null && score != 0;
+            var library = AssetDatabase.LoadAssetAtPath<XRReferenceImageLibrary>(LibraryPath);
+
+            if (!usable)
+            {
+                if (library != null)
+                {
+                    AssetDatabase.DeleteAsset(LibraryPath);
+                }
+                profile.imageLibrary = null;
+                EditorUtility.SetDirty(profile);
+                AssetDatabase.SaveAssetIfDirty(profile);
+
+                string scanMode = profile.autoDetectByColor
+                    ? "The app finds the note by its COVER COLOUR instead: point the phone at the note, the green outline with " +
+                      "Width/Length/Depth snaps onto it, then tap LOCK."
+                    : "Align the green box over the note and tap LOCK.";
+                note = image == null
+                    ? "No cover image: " + scanMode
+                    : $"Cover '{image.name}' is too plain for ARCore image tracking (score 0), so image tracking is off. " + scanMode;
+                Debug.LogWarning("[NoteMarkerToolWindow] " + note);
+                return null;
+            }
+
+            string dir = Path.GetDirectoryName(LibraryPath);
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+            if (library == null)
+            {
+                library = ScriptableObject.CreateInstance<XRReferenceImageLibrary>();
+                AssetDatabase.CreateAsset(library, LibraryPath);
+            }
+
+            // Use AR Foundation's editor API: writing m_Images through SerializedObject leaves the
+            // image GUID and texture GUID at zero, and ARCore's build step then fails with
+            // "XRReferenceImage ... is missing a texture", so the marker never gets baked.
+            while (library.count > 0)
+            {
+                library.RemoveAt(library.count - 1);
+            }
+
+            library.Add();
+            library.SetName(0, string.IsNullOrEmpty(profile.modelName) ? "Note" : profile.modelName);
+            library.SetTexture(0, image, true);
+            library.SetSpecifySize(0, true);
+            // Physical size in meters (X = width, Y = length)
+            library.SetSize(0, new Vector2(profile.widthMm / 1000f, profile.lengthMm / 1000f));
+            EditorUtility.SetDirty(library);
+            AssetDatabase.SaveAssetIfDirty(library);
+
+            profile.imageLibrary = library;
+            EditorUtility.SetDirty(profile);
+            AssetDatabase.SaveAssetIfDirty(profile);
+
+            note = score >= 75
+                ? $"Cover image ARCore score {score}/100: auto-detection enabled (Align & LOCK also available)."
+                : score > 0
+                    ? $"Cover image ARCore score {score}/100 (75+ recommended): auto-detection may be unreliable; Align & LOCK is available."
+                    : "Cover image added; its ARCore score could not be checked.";
+            return library;
+        }
+
+        /// <summary>
+        /// Makes sure every reference image has a non-zero image GUID and a texture GUID that matches its texture.
+        /// A zero texture GUID makes ARCore's build step fail with "XRReferenceImage ... is missing a texture",
+        /// which leaves the marker out of the APK.
+        /// </summary>
+        public static void EnsureLibraryGuids(XRReferenceImageLibrary library)
+        {
+            if (library == null) return;
+
+            // Re-applying the texture through AR Foundation's API recomputes the texture GUID.
+            for (int i = 0; i < library.count; i++)
+            {
+                Texture2D texture = library[i].texture;
+                if (texture != null)
+                {
+                    library.SetTexture(i, texture, true);
+                }
+            }
+
+            // The image GUID has no public setter; fill any zero GUIDs through serialization.
+            var so = new SerializedObject(library);
+            var images = so.FindProperty("m_Images");
+            for (int i = 0; i < images.arraySize; i++)
+            {
+                var guidProp = images.GetArrayElementAtIndex(i).FindPropertyRelative("m_SerializedGuid");
+                var lowProp = guidProp.FindPropertyRelative("m_GuidLow");
+                var highProp = guidProp.FindPropertyRelative("m_GuidHigh");
+                if (lowProp.ulongValue == 0 && highProp.ulongValue == 0)
+                {
+                    byte[] bytes = Guid.NewGuid().ToByteArray();
+                    lowProp.ulongValue = BitConverter.ToUInt64(bytes, 0);
+                    highProp.ulongValue = BitConverter.ToUInt64(bytes, 8);
+                }
+            }
+            so.ApplyModifiedPropertiesWithoutUndo();
+
+            EditorUtility.SetDirty(library);
+            AssetDatabase.SaveAssetIfDirty(library);
+        }
+
+        /// <summary>
+        /// Runs ARCore's arcoreimg tool on the image. Returns a 0-100 score (ARCore recommends 75+),
+        /// or -1 if the tool could not run. A plain cover with too few keypoints scores 0.
+        /// </summary>
+        public static int EvaluateMarkerQuality(Texture2D texture, out string message)
+        {
+            message = "";
+            string imagePath = texture != null ? Path.GetFullPath(AssetDatabase.GetAssetPath(texture)) : null;
+            if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
+            {
+                message = "Image file not found on disk.";
+                return -1;
+            }
+
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/com.unity.xr.arcore");
+            if (package == null)
+            {
+                message = "ARCore XR Plugin package not found.";
+                return -1;
+            }
+
+            string toolDir = Application.platform == RuntimePlatform.WindowsEditor ? "Windows"
+                           : Application.platform == RuntimePlatform.OSXEditor ? "MacOS" : "Linux";
+            string toolName = Application.platform == RuntimePlatform.WindowsEditor ? "arcoreimg.exe" : "arcoreimg";
+            string toolPath = Path.Combine(package.resolvedPath, "Tools~", toolDir, toolName);
+            if (!File.Exists(toolPath))
+            {
+                message = "arcoreimg tool not found at " + toolPath;
+                return -1;
+            }
+
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(toolPath, $"eval-img --input_image_path=\"{imagePath}\"")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using (var process = System.Diagnostics.Process.Start(psi))
+                {
+                    string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+                    process.WaitForExit(30000);
+                    output = output.Trim();
+
+                    foreach (string line in output.Split('\n'))
+                    {
+                        if (int.TryParse(line.Trim(), out int score))
+                        {
+                            message = score >= 75 ? "Good for ARCore auto-detection." : "Low score: auto-detection will be unreliable.";
+                            return score;
+                        }
+                    }
+
+                    message = string.IsNullOrEmpty(output) ? "No result from arcoreimg." : output;
+                    // arcoreimg prints "Failed to get enough keypoints" for plain images: treat as score 0.
+                    return output.IndexOf("keypoints", StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : -1;
+                }
+            }
+            catch (Exception ex)
+            {
+                message = "Could not run arcoreimg: " + ex.Message;
+                return -1;
+            }
+        }
+
         public static void ConfigureScene(NoteMarkerProfile profile, XRReferenceImageLibrary library)
         {
+            EnsureLibraryGuids(library);
+
             // Clean up ghost / residual objects
             string[] ghostNames = new string[]
             {
@@ -437,7 +754,11 @@ namespace CADInspection.Editor
                 "Inspected_Notebook_Body",
                 "Notebook_Body",
                 "Locked_QC_Anchor",
-                "Locked_Note_Anchor"
+                "Locked_Note_Anchor",
+                "Simulated_Note_Anchor",
+                "Note_AlignmentGuide",
+                "QC_AlignmentGuide",
+                "ARScanningReticle"
             };
 
             foreach (var gName in ghostNames)
@@ -478,9 +799,28 @@ namespace CADInspection.Editor
 
             if (trackedImageManager != null)
             {
-                trackedImageManager.referenceLibrary = library;
-                trackedImageManager.requestedMaxNumberOfMovingImages = 1;
+                // With no usable cover image there is no library: switch image tracking off entirely
+                // so the app runs Align & Lock only and no image subsystem is started on the phone.
+                var so = new SerializedObject(trackedImageManager);
+                so.FindProperty("m_SerializedLibrary").objectReferenceValue = library;
+                so.FindProperty("m_MaxNumberOfMovingImages").intValue = 1;
+                so.ApplyModifiedPropertiesWithoutUndo();
+                trackedImageManager.enabled = library != null;
                 EditorUtility.SetDirty(trackedImageManager);
+            }
+
+            // 1b. Align & Lock needs table detection: keep the plane manager on (horizontal surfaces only).
+            //     It was found switched off, which left LOCK permanently disabled on the phone.
+            var planeManager = FindFirstObjectByType<ARPlaneManager>(FindObjectsInactive.Include);
+            if (planeManager != null)
+            {
+                planeManager.requestedDetectionMode = UnityEngine.XR.ARSubsystems.PlaneDetectionMode.Horizontal;
+                planeManager.enabled = true;
+                EditorUtility.SetDirty(planeManager);
+            }
+            else
+            {
+                Debug.LogError("[NoteMarkerToolWindow] No ARPlaneManager found on the XR Origin: table detection (and LOCK) will not work.");
             }
 
             // 2. Configure InspectionManagers object
@@ -508,24 +848,21 @@ namespace CADInspection.Editor
             tracker.SetProfile(profile);
             EditorUtility.SetDirty(tracker);
 
-            // Disable legacy QC components on InspectionManagers to avoid conflicting events and hardcoded values
-            var qcUI = managers.GetComponent<CADInspection.UI.QCInspectionUIManager>();
-            if (qcUI != null) { qcUI.enabled = false; EditorUtility.SetDirty(qcUI); }
+            // Add the cover-colour detector next to the tracker (it reads its settings from the profile)
+            if (managers.GetComponent<NoteColorDetector>() == null)
+            {
+                Undo.AddComponent<NoteColorDetector>(managers);
+            }
 
-            var markerlessQC = managers.GetComponent<CADInspection.Detection.MarkerlessQCController>();
-            if (markerlessQC != null) { markerlessQC.enabled = false; EditorUtility.SetDirty(markerlessQC); }
-
-            var oldDetector = managers.GetComponent<CADInspection.Detection.NotebookDetector>();
-            if (oldDetector != null) { oldDetector.enabled = false; EditorUtility.SetDirty(oldDetector); }
-
-            var oldPlaneTap = managers.GetComponent<CADInspection.Detection.PlaneTapToSpawnCAD>();
-            if (oldPlaneTap != null) { oldPlaneTap.enabled = false; EditorUtility.SetDirty(oldPlaneTap); }
-
-            var oldEngine = managers.GetComponent<CADInspection.Measurement.InspectionEngine>();
-            if (oldEngine != null) { oldEngine.enabled = false; EditorUtility.SetDirty(oldEngine); }
-
-            var oldWireframe = managers.GetComponent<CADInspection.Visualization.CADWireframeOverlay>();
-            if (oldWireframe != null) { oldWireframe.enabled = false; EditorUtility.SetDirty(oldWireframe); }
+            // Remove legacy QC components from InspectionManagers. Disabling them is not enough:
+            // Unity still runs Awake() on disabled components of an active GameObject, which made
+            // MarkerlessQCController build a visible static guide box and the overlays purge the scene.
+            // Those scripts have been deleted, so any leftover instances show up as missing scripts.
+            int removed = GameObjectUtility.RemoveMonoBehavioursWithMissingScript(managers);
+            if (removed > 0)
+            {
+                Debug.Log($"[NoteMarkerToolWindow] Removed {removed} missing (legacy) script component(s) from InspectionManagers.");
+            }
 
             // 3. Configure UI Canvas
             ConfigureCanvasUI(profile, tracker);

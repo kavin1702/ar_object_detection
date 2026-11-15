@@ -14,16 +14,21 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CADInspection.Detection.NoteMarkerProfile
   modelName: Note
   markerImage: {fileID: 2800000, guid: 478f5346db1357046aeaecc96974343f, type: 3}
-  imageLibrary: {fileID: 11400000, guid: 6ea2d9abdcf0b2446bb35f6ee9fc94c1, type: 2}
+  imageLibrary: {fileID: 0}
   lengthMm: 240
   widthMm: 180
   thicknessMm: 6
+  autoDetectByColor: 1
+  coverColor: {r: 0.06448804, g: 0.6630363, b: 0.73860687, a: 1}
+  colorHueTolerance: 18
+  showDetectionDebug: 0
+  flipCameraImageVertically: 0
   outlineColor: {r: 0.12, g: 0.95, b: 0.42, a: 1}
   lineWidthMm: 3.5
   showCornerNodes: 1
-  dimensionHeightOffsetMm: 40
-  dimensionFormat: 2
+  calloutOffsetMm: 40
+  decimals: 1
   dimensionTextColor: {r: 1, g: 1, b: 1, a: 1}
-  showLeaderLine: 1
+  showDimensionLines: 1
   showBackplate: 1
   optionalModelPrefab: {fileID: 0}

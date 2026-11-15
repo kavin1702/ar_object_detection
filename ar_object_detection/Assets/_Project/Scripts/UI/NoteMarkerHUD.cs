@@ -159,6 +159,7 @@ namespace CADInspection.UI
             if (m_LockAndInspectButton != null)
             {
                 m_LockAndInspectButton.gameObject.SetActive(true);
+                m_LockAndInspectButton.interactable = true; // RESCAN must always be available
                 if (m_LockAndInspectLabel != null)
                     m_LockAndInspectLabel.text = "RESCAN NOTE";
             }
@@ -171,7 +172,10 @@ namespace CADInspection.UI
 #if UNITY_EDITOR
                 m_StatusText.text = "Align green box over note & tap LOCK (or press [Space] to test)...";
 #else
-                m_StatusText.text = "Align green box over note, then tap LOCK (or aim at marker cover)...";
+                bool imageDetection = m_Tracker != null && m_Tracker.Profile != null && m_Tracker.Profile.imageLibrary != null;
+                m_StatusText.text = imageDetection
+                    ? "Align green box over note, then tap LOCK (or aim at marker cover)..."
+                    : "Align green box over note, then tap LOCK...";
 #endif
                 m_StatusText.color = Color.white;
             }
@@ -202,6 +206,24 @@ namespace CADInspection.UI
 
         private void HandleAlignmentUpdated(float distanceMeters, bool hasPlane)
         {
+            // Without a detected table surface the guide floats in front of the camera, so locking
+            // would freeze the outline in mid-air. Allow it in the Editor for testing without AR.
+            if (m_LockAndInspectButton != null && m_Tracker != null && !m_Tracker.IsLocked)
+            {
+                m_LockAndInspectButton.interactable = hasPlane || Application.isEditor;
+            }
+
+            // Guidance from the cover-colour auto-detection (found / move back / looking...)
+            if (m_StatusText != null && m_Tracker != null && !m_Tracker.IsLocked)
+            {
+                string hint = m_Tracker.AlignmentHint;
+                if (!string.IsNullOrEmpty(hint))
+                {
+                    m_StatusText.text = hint;
+                    m_StatusText.color = m_Tracker.IsAutoDetected ? new Color(0.2f, 0.95f, 0.45f) : Color.white;
+                }
+            }
+
             if (m_DistanceText == null) return;
 
             if (hasPlane && distanceMeters > 0f)

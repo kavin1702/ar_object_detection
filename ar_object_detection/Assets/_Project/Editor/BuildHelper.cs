@@ -20,13 +20,32 @@ namespace CADInspection.Editor
             // Pre-configure and save scene to ensure exact dimensions, image library, and buttons are baked into build
             try
             {
+                if (Directory.Exists("Assets/XR/Temp"))
+                {
+                    Directory.Delete("Assets/XR/Temp", true);
+                }
+                if (File.Exists("Assets/XR/Temp.meta"))
+                {
+                    File.Delete("Assets/XR/Temp.meta");
+                }
+
                 string scenePath = "Assets/Scenes/AR_Detection.unity";
                 var scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
                 var profile = AssetDatabase.LoadAssetAtPath<NoteMarkerProfile>("Assets/_Project/Settings/CurrentNoteMarkerProfile.asset");
-                var library = AssetDatabase.LoadAssetAtPath<XRReferenceImageLibrary>("Assets/_Project/Settings/NoteMarkerLibrary.asset");
 
-                if (profile != null && library != null)
+                if (profile != null)
                 {
+                    // Cover colour used by the in-app auto-detection, taken from the marker image
+                    profile.coverColor = NoteMarkerToolWindow.ComputeCoverColor(profile.markerImage, profile.coverColor);
+                    EditorUtility.SetDirty(profile);
+                    AssetDatabase.SaveAssetIfDirty(profile);
+
+                    // Keeps the image library only when ARCore can track the cover; otherwise removes it so the
+                    // ARCore build step does not fail and the app runs Align & Lock only.
+                    XRReferenceImageLibrary library = NoteMarkerToolWindow.SyncImageLibrary(profile, out _, out string libraryNote);
+                    Debug.Log("[BuildHelper] " + libraryNote);
+
+                    NoteMarkerToolWindow.EnsureLibraryGuids(library);
                     NoteMarkerToolWindow.ConfigureScene(profile, library);
                     EditorSceneManager.SaveScene(scene);
                     Debug.Log("<color=#20E060>[BuildHelper] Note Marker Profile & Scene configured successfully.</color>");
@@ -56,7 +75,10 @@ namespace CADInspection.Editor
 
             if (summary.result == BuildResult.Succeeded)
             {
-                Debug.Log($"<color=#20E060><b>[BuildHelper] BUILD SUCCEEDED!</b></color> Output: {outputPath} ({summary.totalSize / (1024 * 1024)} MB) in {summary.totalTime.TotalSeconds:F1}s");
+                // report.summary.totalSize counts intermediate build data (it said ~956 MB for a ~39 MB APK),
+                // so report the size of the APK file itself.
+                string sizeText = File.Exists(outputPath) ? $"{new FileInfo(outputPath).Length / (1024f * 1024f):F1} MB" : "size unknown";
+                Debug.Log($"<color=#20E060><b>[BuildHelper] BUILD SUCCEEDED!</b></color> Output: {outputPath} ({sizeText}) in {summary.totalTime.TotalSeconds:F1}s");
             }
             else if (summary.result == BuildResult.Failed)
             {

@@ -26,9 +26,14 @@ namespace CADInspection.Detection
         [SerializeField] private ARAnchorManager m_AnchorManager;
         [SerializeField] private Camera m_ARCamera;
         [SerializeField] private NoteOutlineRenderer m_OutlineRenderer;
+        [SerializeField] private NoteColorDetector m_ColorDetector;
+
+        private bool m_IsAutoDetected;
 
         // Alignment Visual Guide
+        private const string AlignmentGuideName = "Note_AlignmentGuide";
         private GameObject m_AlignmentGuideRoot;
+        private GameObject m_PreviewCallouts;
         private LineRenderer[] m_GuideLines;
         private Material m_GuideLineMaterial;
 
@@ -54,6 +59,12 @@ namespace CADInspection.Detection
         public float CurrentYaw => m_CurrentYaw;
         public bool HasPlaneContact => m_HasPlaneContact;
         public Pose CurrentAlignmentPose => m_CurrentAlignmentPose;
+
+        /// <summary>True while the green box is snapped to the notebook found by its cover colour.</summary>
+        public bool IsAutoDetected => m_IsAutoDetected && !m_IsLocked;
+
+        /// <summary>Guidance from the colour detector for the HUD while aligning, or null.</summary>
+        public string AlignmentHint => !m_IsLocked && m_ColorDetector != null ? m_ColorDetector.StatusMessage : null;
 
         // Events
         public event Action<NoteMarkerProfile> OnNoteDetected;
@@ -128,6 +139,7 @@ namespace CADInspection.Detection
             SafeClearAnchorManagerInstanceIfInvalid();
             Application.quitting += HandleApplicationQuitting;
             FindSceneReferences();
+            EnsurePlaneDetection();
             ApplyReferenceLibrary();
             BuildAlignmentGuideVisual();
         }
@@ -141,6 +153,9 @@ namespace CADInspection.Detection
 
         private void OnEnable()
         {
+            // Touch.activeTouches throws unless EnhancedTouch is enabled; it is reference counted, so pair with Disable.
+            UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Enable();
+
             SafeClearAnchorManagerInstanceIfInvalid();
             if (m_TrackedImageManager != null)
             {
@@ -155,6 +170,8 @@ namespace CADInspection.Detection
 
         private void OnDisable()
         {
+            UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+
             SafeClearAnchorManagerInstanceIfInvalid();
             if (m_TrackedImageManager != null)
             {
@@ -227,6 +244,35 @@ namespace CADInspection.Detection
 
             if (m_OutlineRenderer == null)
                 m_OutlineRenderer = GetComponent<NoteOutlineRenderer>() ?? FindFirstObjectByType<NoteOutlineRenderer>();
+
+            if (m_ColorDetector == null)
+                m_ColorDetector = GetComponent<NoteColorDetector>();
+            if (m_ColorDetector == null)
+                m_ColorDetector = FindFirstObjectByType<NoteColorDetector>();
+        }
+
+        /// <summary>
+        /// Align &amp; Lock needs the table surface: the guide snaps to it and LOCK anchors to it.
+        /// If the plane manager is switched off, no surface is ever found and LOCK can never be used.
+        /// </summary>
+        private void EnsurePlaneDetection()
+        {
+            if (m_PlaneManager == null)
+            {
+                Debug.LogError("[NoteMarkerTracker] No ARPlaneManager in the scene: the table surface cannot be detected, so LOCK will stay disabled.");
+                return;
+            }
+
+            if (m_PlaneManager.requestedDetectionMode == PlaneDetectionMode.None)
+            {
+                m_PlaneManager.requestedDetectionMode = PlaneDetectionMode.Horizontal;
+            }
+
+            if (!m_PlaneManager.enabled)
+            {
+                Debug.LogWarning("[NoteMarkerTracker] ARPlaneManager was disabled; enabling it so the table surface can be detected.");
+                m_PlaneManager.enabled = true;
+            }
         }
 
         public void SetProfile(NoteMarkerProfile profile)
@@ -246,7 +292,8 @@ namespace CADInspection.Detection
             {
                 try
                 {
-                    if (m_TrackedImageManager.referenceLibrary == null)
+                    // Always follow the active profile so a newly configured cover replaces the old one.
+                    if (!ReferenceEquals(m_TrackedImageManager.referenceLibrary, m_Profile.imageLibrary))
                     {
                         m_TrackedImageManager.referenceLibrary = m_Profile.imageLibrary;
                     }
@@ -284,6 +331,49 @@ namespace CADInspection.Detection
                 UpdateAlignmentTracking();
                 ProcessTapToReposition();
             }
+            else
+            {
+                RefineLockedOutline();
+            }
+        }
+
+        // After LOCK the outline is fixed in AR space. On plain/glossy floors ARCore tracking drifts a little,
+        // so a fixed object slides against the real notebook as the phone moves. While the notebook is in
+        // view, pull the outline back onto it: small steps, no reaction to tiny noise, ignore big jumps.
+        private const float RefineBlend = 0.25f;          // fraction of the error corrected per detection (~1 s to settle)
+        private const float RefineDeadZoneMeters = 0.004f;
+        private const float RefineDeadZoneDegrees = 1.5f;
+        private const float RefineMaxJumpMeters = 0.12f;   // larger = probably another object or a bad frame
+        private const float RefineMaxJumpDegrees = 30f;
+        private int m_LastRefineSample = -1;
+        private bool m_LockedOnImage;
+
+        private void RefineLockedOutline()
+        {
+            if (m_LockedOnImage || m_Profile == null || !m_Profile.refineAfterLock) return;
+            if (m_ColorDetector == null || m_OutlineRenderer == null) return;
+
+            Transform root = m_OutlineRenderer.OutlineRoot;
+            if (root == null) return;
+
+            // Use each new detection once
+            if (m_ColorDetector.FoundCount == m_LastRefineSample) return;
+            if (!m_ColorDetector.TryGetFreshPose(out Pose detected, out _)) return;
+            m_LastRefineSample = m_ColorDetector.FoundCount;
+
+            // Keep the user's rotate offset, and don't let the outline flip 180° (labels would jump edges)
+            Quaternion target = detected.rotation * Quaternion.Euler(0f, m_CurrentYaw, 0f);
+            Quaternion flipped = target * Quaternion.Euler(0f, 180f, 0f);
+            if (Quaternion.Angle(root.rotation, flipped) < Quaternion.Angle(root.rotation, target)) target = flipped;
+
+            float distance = Vector3.Distance(root.position, detected.position);
+            float angle = Quaternion.Angle(root.rotation, target);
+            if (distance > RefineMaxJumpMeters || angle > RefineMaxJumpDegrees) return;
+            if (distance < RefineDeadZoneMeters && angle < RefineDeadZoneDegrees) return;
+
+            root.SetPositionAndRotation(
+                Vector3.Lerp(root.position, detected.position, RefineBlend),
+                Quaternion.Slerp(root.rotation, target, RefineBlend));
         }
 
         /// <summary>
@@ -300,7 +390,20 @@ namespace CADInspection.Detection
             Vector2 screenCenter = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
             bool planeHit = false;
 
-            if (m_RaycastManager != null)
+            // 1. Notebook found by its cover colour: snap the guide onto it (rotate buttons still add an offset).
+            Pose detectedPose = default;
+            TrackableId detectedPlane = TrackableId.invalidId;
+            m_IsAutoDetected = m_ColorDetector != null && m_ColorDetector.TryGetFreshPose(out detectedPose, out detectedPlane);
+            if (m_IsAutoDetected)
+            {
+                planeHit = true;
+                m_HasPlaneContact = true;
+                m_LastHitTrackableId = detectedPlane;
+                m_CurrentAlignmentPose = new Pose(detectedPose.position, detectedPose.rotation * Quaternion.Euler(0f, m_CurrentYaw, 0f));
+                OnAlignmentUpdated?.Invoke(Vector3.Distance(m_ARCamera.transform.position, detectedPose.position), true);
+            }
+            // 2. Otherwise follow the table surface at the screen centre.
+            else if (m_RaycastManager != null)
             {
                 if (m_RaycastManager.Raycast(screenCenter, s_Hits, TrackableType.PlaneWithinPolygon | TrackableType.PlaneWithinBounds))
                 {
@@ -341,6 +444,12 @@ namespace CADInspection.Detection
                 m_AlignmentGuideRoot.SetActive(true);
                 m_AlignmentGuideRoot.transform.position = Vector3.Lerp(m_AlignmentGuideRoot.transform.position, m_CurrentAlignmentPose.position, Time.deltaTime * 22f);
                 m_AlignmentGuideRoot.transform.rotation = Quaternion.Slerp(m_AlignmentGuideRoot.transform.rotation, m_CurrentAlignmentPose.rotation, Time.deltaTime * 22f);
+            }
+
+            // Dimension callouts only when the box sits on the table (not while it floats in front of the camera)
+            if (m_PreviewCallouts != null && m_PreviewCallouts.activeSelf != m_HasPlaneContact)
+            {
+                m_PreviewCallouts.SetActive(m_HasPlaneContact);
             }
         }
 
@@ -457,9 +566,13 @@ namespace CADInspection.Detection
                 }
             }
 
+            m_LockedOnImage = false;
+            m_LastRefineSample = m_ColorDetector != null ? m_ColorDetector.FoundCount : -1;
+
             if (m_CurrentAnchor != null)
             {
                 anchorTransform = m_CurrentAnchor.transform;
+                Debug.Log("[NoteMarkerTracker] LOCK: outline attached to an ARAnchor on the detected plane.");
             }
             else
             {
@@ -468,6 +581,8 @@ namespace CADInspection.Detection
                 m_WorldAnchorRoot.transform.position = m_CurrentAlignmentPose.position;
                 m_WorldAnchorRoot.transform.rotation = m_CurrentAlignmentPose.rotation;
                 anchorTransform = m_WorldAnchorRoot.transform;
+                Debug.LogWarning("[NoteMarkerTracker] LOCK: no ARAnchor could be attached; outline uses a fixed world position " +
+                                 "(more prone to drift; refinement from the cover colour keeps it on the notebook).");
             }
 
             // 2. Hide alignment guide
@@ -522,6 +637,7 @@ namespace CADInspection.Detection
             if (image == null || image.trackingState != TrackingState.Tracking) return;
 
             m_IsLocked = true;
+            m_LockedOnImage = true; // ARCore already keeps image-tracked outlines on the cover; no colour refinement
 
             // Clear previous anchors cleanly
             if (m_CurrentAnchor != null)
@@ -715,12 +831,44 @@ namespace CADInspection.Detection
             {
                 if (Application.isPlaying) Destroy(m_AlignmentGuideRoot);
                 else DestroyImmediate(m_AlignmentGuideRoot);
+                m_AlignmentGuideRoot = null;
             }
 
-            m_AlignmentGuideRoot = new GameObject("Note_AlignmentGuide");
-            m_AlignmentGuideRoot.transform.SetParent(transform, false);
+            // m_AlignmentGuideRoot is not serialized, so after a domain reload it is null even though
+            // a guide from an earlier build may still be a child. Remove every copy by name.
+            for (int i = transform.childCount - 1; i >= 0; i--)
+            {
+                Transform child = transform.GetChild(i);
+                if (child.name != AlignmentGuideName) continue;
+                if (Application.isPlaying) Destroy(child.gameObject);
+                else DestroyImmediate(child.gameObject);
+            }
 
-            Shader shader = Shader.Find("Universal Render Pipeline/Unlit") 
+            // The guide is runtime-only. Building it from editor tools (SetProfile via ConfigureScene)
+            // used to save a new copy into the scene on every build.
+            if (!Application.isPlaying) return;
+
+            m_AlignmentGuideRoot = new GameObject(AlignmentGuideName);
+            m_AlignmentGuideRoot.transform.SetParent(transform, false);
+            m_PreviewCallouts = null;
+
+            // Live preview: the same outline + Width/Length/Depth callouts the locked view shows, so the user
+            // sees the dimensions on the notebook while scanning (like the reference image). LOCK freezes it.
+            if (m_OutlineRenderer == null)
+                m_OutlineRenderer = GetComponent<NoteOutlineRenderer>();
+            if (m_OutlineRenderer != null && m_Profile != null)
+            {
+                GameObject preview = m_OutlineRenderer.BuildPreview(m_AlignmentGuideRoot.transform, m_Profile);
+                if (preview != null)
+                {
+                    m_PreviewCallouts = preview.transform.Find("DimensionCallouts")?.gameObject;
+                    if (m_PreviewCallouts != null) m_PreviewCallouts.SetActive(false); // shown once on the table
+                    m_AlignmentGuideRoot.SetActive(!m_IsLocked);
+                    return;
+                }
+            }
+
+            Shader shader = Shader.Find("Universal Render Pipeline/Unlit")
                          ?? Shader.Find("Sprites/Default") 
                          ?? Shader.Find("Mobile/Particles/Alpha Blended")
                          ?? Shader.Find("Hidden/Internal-Colored");

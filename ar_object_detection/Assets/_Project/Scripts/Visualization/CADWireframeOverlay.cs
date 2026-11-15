@@ -23,19 +23,52 @@ namespace CADInspection.Visualization
 
         private void Awake()
         {
+            PurgeGhostObjects();
             SetupMaterial();
+        }
+
+        /// <summary>
+        /// Cleans up any stray or serialized ghost objects from the scene so nothing floats in mid-air.
+        /// </summary>
+        public static void PurgeGhostObjects()
+        {
+            string[] ghostNames = new string[]
+            {
+                "CAD_Wireframe_Root",
+                "Inspected_Notebook_Body",
+                "Notebook_Body",
+                "Locked_QC_Anchor",
+                "Spawned_CAD_Notebook"
+            };
+
+            foreach (var name in ghostNames)
+            {
+                var objs = Resources.FindObjectsOfTypeAll<GameObject>();
+                foreach (var obj in objs)
+                {
+                    if (obj != null && obj.name == name && obj.scene.isLoaded)
+                    {
+                        if (Application.isPlaying) Destroy(obj);
+                        else DestroyImmediate(obj);
+                    }
+                }
+            }
         }
 
         private void SetupMaterial()
         {
             Shader unlit = Shader.Find("Universal Render Pipeline/Unlit") 
                         ?? Shader.Find("Hidden/Internal-Colored") 
-                        ?? Shader.Find("Sprites/Default");
+                        ?? Shader.Find("Sprites/Default")
+                        ?? Shader.Find("Mobile/Particles/Alpha Blended");
 
-            m_WireframeMaterial = new Material(unlit);
-            m_WireframeMaterial.color = m_WireframeColor;
-            if (m_WireframeMaterial.HasProperty("_BaseColor"))
-                m_WireframeMaterial.SetColor("_BaseColor", m_WireframeColor);
+            if (unlit != null)
+            {
+                m_WireframeMaterial = new Material(unlit);
+                m_WireframeMaterial.color = m_WireframeColor;
+                if (m_WireframeMaterial.HasProperty("_BaseColor"))
+                    m_WireframeMaterial.SetColor("_BaseColor", m_WireframeColor);
+            }
         }
 
         public void DisplayOverlay(Pose pose, float measuredLengthMm, float measuredWidthMm, float measuredDepthMm)
@@ -48,6 +81,10 @@ namespace CADInspection.Visualization
         /// </summary>
         public void DisplayOverlay(Transform anchorTransform, Pose pose, float measuredLengthMm, float measuredWidthMm, float measuredDepthMm)
         {
+            m_LengthMm = measuredLengthMm;
+            m_WidthMm = measuredWidthMm;
+            m_ThicknessMm = measuredDepthMm;
+
             HideOverlay();
 
             m_OverlayRoot = new GameObject("CAD_Wireframe_Root");
@@ -66,10 +103,40 @@ namespace CADInspection.Visualization
             }
 
             // Build pure wireframe cage (no solid mesh)
-            BuildWireframeMesh();
+            BuildWireframeMesh(false);
 
             // Build 3D floating dimension badges on edges
-            BuildDimensionCallouts(measuredLengthMm, measuredWidthMm, measuredDepthMm);
+            BuildDimensionCallouts(measuredLengthMm, measuredWidthMm, measuredDepthMm, false);
+        }
+
+        /// <summary>
+        /// Displays the wireframe overlay projecting downwards from the tracked top cover image to the table.
+        /// </summary>
+        public void DisplayOverlayForImageTarget(Transform anchorTransform, Vector3 position, Quaternion rotation, float lengthMm, float widthMm, float thicknessMm)
+        {
+            m_LengthMm = lengthMm;
+            m_WidthMm = widthMm;
+            m_ThicknessMm = thicknessMm;
+
+            HideOverlay();
+
+            m_OverlayRoot = new GameObject("CAD_Wireframe_Root");
+
+            if (anchorTransform != null)
+            {
+                m_OverlayRoot.transform.SetParent(anchorTransform, false);
+                m_OverlayRoot.transform.localPosition = Vector3.zero;
+                m_OverlayRoot.transform.localRotation = Quaternion.identity;
+            }
+            else
+            {
+                m_OverlayRoot.transform.position = position;
+                m_OverlayRoot.transform.rotation = rotation;
+            }
+
+            // Invert thickness downwards from top cover (Y=0) to desk (Y=-thickness)
+            BuildWireframeMesh(true);
+            BuildDimensionCallouts(lengthMm, widthMm, thicknessMm, true);
         }
 
         public void HideOverlay()
@@ -81,22 +148,25 @@ namespace CADInspection.Visualization
             }
         }
 
-        private void BuildWireframeMesh()
+        private void BuildWireframeMesh(bool projectDownwardsFromCover = false)
         {
             float hx = (m_WidthMm / 1000f) * 0.5f;
             float hy = (m_ThicknessMm / 1000f);
             float hz = (m_LengthMm / 1000f) * 0.5f;
 
+            float yBottom = projectDownwardsFromCover ? -hy : 0f;
+            float yTop = projectDownwardsFromCover ? 0f : hy;
+
             Vector3[] corners = new Vector3[8]
             {
-                new Vector3(-hx, 0f, -hz), // 0: Bottom Back Left
-                new Vector3( hx, 0f, -hz), // 1: Bottom Back Right
-                new Vector3( hx, 0f,  hz), // 2: Bottom Front Right
-                new Vector3(-hx, 0f,  hz), // 3: Bottom Front Left
-                new Vector3(-hx, hy, -hz), // 4: Top Back Left
-                new Vector3( hx, hy, -hz), // 5: Top Back Right
-                new Vector3( hx, hy,  hz), // 6: Top Front Right
-                new Vector3(-hx, hy,  hz)  // 7: Top Front Left
+                new Vector3(-hx, yBottom, -hz), // 0: Bottom Back Left
+                new Vector3( hx, yBottom, -hz), // 1: Bottom Back Right
+                new Vector3( hx, yBottom,  hz), // 2: Bottom Front Right
+                new Vector3(-hx, yBottom,  hz), // 3: Bottom Front Left
+                new Vector3(-hx, yTop,    -hz), // 4: Top Back Left
+                new Vector3( hx, yTop,    -hz), // 5: Top Back Right
+                new Vector3( hx, yTop,     hz), // 6: Top Front Right
+                new Vector3(-hx, yTop,     hz)  // 7: Top Front Left
             };
 
             int[,] edges = new int[12, 2]
@@ -124,23 +194,18 @@ namespace CADInspection.Visualization
             }
         }
 
-        private void BuildDimensionCallouts(float lengthMm, float widthMm, float depthMm)
+        private void BuildDimensionCallouts(float lengthMm, float widthMm, float depthMm, bool projectDownwardsFromCover = false)
         {
             float hx = (m_WidthMm / 1000f) * 0.5f;
             float hy = (m_ThicknessMm / 1000f);
             float hz = (m_LengthMm / 1000f) * 0.5f;
 
-            // 1. Length Callout (Along Side: Z axis)
-            Vector3 lengthPos = new Vector3(-hx - 0.045f, hy * 0.5f, 0f);
-            CreateFloatingBadge($"Length (L)\n{lengthMm:F1} mm", lengthPos);
+            float yMid = projectDownwardsFromCover ? -hy * 0.5f : hy * 0.5f;
+            float yTop = projectDownwardsFromCover ? 0.04f : hy + 0.04f;
 
-            // 2. Width Callout (Along Top Front: X axis)
-            Vector3 widthPos = new Vector3(0f, hy + 0.04f, hz + 0.02f);
-            CreateFloatingBadge($"Width (W)\n{widthMm:F1} mm", widthPos);
-
-            // 3. Depth Callout (Along Vertical Corner: Y axis)
-            Vector3 depthPos = new Vector3(hx + 0.045f, hy * 0.5f, hz);
-            CreateFloatingBadge($"Depth (T)\n{depthMm:F1} mm", depthPos);
+            // Main Dimension Callout Floating Directly Above Model
+            Vector3 aboveModelPos = new Vector3(0f, yTop, 0f);
+            CreateFloatingBadge($"<b>{lengthMm:F0} mm × {widthMm:F0} mm × {depthMm:F0} mm</b>\nL: {lengthMm:F0} mm  W: {widthMm:F0} mm  H: {depthMm:F0} mm", aboveModelPos);
         }
 
         private TextMesh CreateFloatingBadge(string text, Vector3 localPos)

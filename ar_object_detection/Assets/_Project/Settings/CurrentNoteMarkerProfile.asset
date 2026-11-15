@@ -1,0 +1,29 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d777bdbb1df541c4aba8821ccf4061fe, type: 3}
+  m_Name: CurrentNoteMarkerProfile
+  m_EditorClassIdentifier: Assembly-CSharp::CADInspection.Detection.NoteMarkerProfile
+  modelName: Note
+  markerImage: {fileID: 2800000, guid: 478f5346db1357046aeaecc96974343f, type: 3}
+  imageLibrary: {fileID: 11400000, guid: 6ea2d9abdcf0b2446bb35f6ee9fc94c1, type: 2}
+  lengthMm: 240
+  widthMm: 180
+  thicknessMm: 6
+  outlineColor: {r: 0.12, g: 0.95, b: 0.42, a: 1}
+  lineWidthMm: 3.5
+  showCornerNodes: 1
+  dimensionHeightOffsetMm: 40
+  dimensionFormat: 2
+  dimensionTextColor: {r: 1, g: 1, b: 1, a: 1}
+  showLeaderLine: 1
+  showBackplate: 1
+  optionalModelPrefab: {fileID: 0}

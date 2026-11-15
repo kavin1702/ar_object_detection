@@ -22,8 +22,10 @@ namespace CADInspection.AR
         public ARRaycastManager RaycastManager => m_RaycastManager;
         public ARAnchorManager AnchorManager => m_AnchorManager;
 
+#pragma warning disable CS0067
         public event Action<TrackingState> OnTrackingStateChanged;
         public event Action<ARSessionState> OnSessionStateChanged;
+#pragma warning restore CS0067
 
         public ARSessionState CurrentSessionState => ARSession.state;
         public bool IsTrackingReady => ARSession.state == ARSessionState.SessionTracking;
@@ -47,6 +49,7 @@ namespace CADInspection.AR
                 // Ensure anchor manager is present on the XR Origin
                 m_AnchorManager = m_PlaneManager.gameObject.AddComponent<ARAnchorManager>();
             }
+
         }
 
         private void OnEnable()
@@ -57,6 +60,12 @@ namespace CADInspection.AR
         private void OnDisable()
         {
             ARSession.stateChanged -= HandleSessionStateChanged;
+            CADInspection.Detection.NoteMarkerTracker.SafeClearAnchorManagerInstanceIfInvalid();
+        }
+
+        private void OnDestroy()
+        {
+            CADInspection.Detection.NoteMarkerTracker.SafeClearAnchorManagerInstanceIfInvalid();
         }
 
         private void HandleSessionStateChanged(ARSessionStateChangedEventArgs args)

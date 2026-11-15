@@ -15,6 +15,7 @@ namespace CADInspection.UI
     {
         [Header("Master Controller")]
         [SerializeField] private MarkerlessQCController m_Controller;
+        [SerializeField] private ARImageInspectionController m_ImageController;
 
         [Header("UI Panels")]
         [SerializeField] private GameObject m_AlignmentPanel;
@@ -36,6 +37,9 @@ namespace CADInspection.UI
         {
             if (m_Controller == null)
                 m_Controller = FindFirstObjectByType<MarkerlessQCController>();
+
+            if (m_ImageController == null)
+                m_ImageController = FindFirstObjectByType<ARImageInspectionController>();
         }
 
         private void OnEnable()
@@ -45,6 +49,12 @@ namespace CADInspection.UI
                 m_Controller.OnStateChanged += HandleStateChanged;
                 m_Controller.OnDistanceUpdated += HandleDistanceUpdated;
                 m_Controller.OnInspectionEvaluated += HandleInspectionEvaluated;
+            }
+
+            if (m_ImageController != null)
+            {
+                m_ImageController.OnTargetDetected += HandleImageTargetDetected;
+                m_ImageController.OnInspectionEvaluated += HandleInspectionEvaluated;
             }
 
             if (m_RotateLeftButton != null)
@@ -67,6 +77,12 @@ namespace CADInspection.UI
                 m_Controller.OnStateChanged -= HandleStateChanged;
                 m_Controller.OnDistanceUpdated -= HandleDistanceUpdated;
                 m_Controller.OnInspectionEvaluated -= HandleInspectionEvaluated;
+            }
+
+            if (m_ImageController != null)
+            {
+                m_ImageController.OnTargetDetected -= HandleImageTargetDetected;
+                m_ImageController.OnInspectionEvaluated -= HandleInspectionEvaluated;
             }
 
             if (m_RotateLeftButton != null)
@@ -153,6 +169,17 @@ namespace CADInspection.UI
             }
         }
 
+        private void HandleImageTargetDetected(string modelName, float len, float wid, float dep)
+        {
+            if (m_AlignmentPanel != null) m_AlignmentPanel.SetActive(false);
+            if (m_ResultsPanel != null) m_ResultsPanel.SetActive(true);
+
+            if (m_ModelPillText != null)
+            {
+                m_ModelPillText.text = $"TARGET: {modelName} ({len:F0}x{wid:F0}x{dep:F0}mm) [IMAGE LOCKED]";
+            }
+        }
+
         private void OnRotateLeftClicked()
         {
             if (m_Controller != null) m_Controller.RotateAlignmentFrame(-15f);
@@ -171,6 +198,7 @@ namespace CADInspection.UI
         private void OnRescanClicked()
         {
             if (m_Controller != null) m_Controller.SetState(QCWorkflowState.GuidedAlignment);
+            if (m_ImageController != null) m_ImageController.ResetScan();
         }
     }
 }

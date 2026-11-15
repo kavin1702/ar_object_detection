@@ -156,7 +156,7 @@ namespace CADInspection.Detection
             m_ScanningReticle.gameObject.SetActive(false); // Hide scanning reticle in favor of inspection overlay
 
             // Attach anchor to make tracking rock-solid
-            if (m_AnchorManager != null)
+            if (m_AnchorManager != null && m_AnchorManager.enabled && m_AnchorManager.subsystem != null && m_AnchorManager.subsystem.running)
             {
                 var anchorObj = new GameObject("RegisteredNotebookAnchor");
                 anchorObj.transform.position = m_CurrentSurfacePose.position;
@@ -179,7 +179,15 @@ namespace CADInspection.Detection
 
             if (m_LockedAnchor != null)
             {
-                Destroy(m_LockedAnchor.gameObject);
+                NoteMarkerTracker.SafeClearAnchorManagerInstanceIfInvalid();
+                if (m_AnchorManager != null && m_AnchorManager.enabled)
+                {
+                    try { m_AnchorManager.TryRemoveAnchor(m_LockedAnchor); } catch { }
+                }
+                if (m_LockedAnchor != null && m_LockedAnchor.gameObject != null)
+                {
+                    Destroy(m_LockedAnchor.gameObject);
+                }
                 m_LockedAnchor = null;
             }
 

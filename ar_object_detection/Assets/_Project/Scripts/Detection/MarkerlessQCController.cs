@@ -74,6 +74,8 @@ namespace CADInspection.Detection
 
         private void Awake()
         {
+            CADWireframeOverlay.PurgeGhostObjects();
+
             if (m_RaycastManager == null) m_RaycastManager = FindFirstObjectByType<ARRaycastManager>();
             if (m_PlaneManager == null) m_PlaneManager = FindFirstObjectByType<ARPlaneManager>();
             if (m_AnchorManager == null) m_AnchorManager = FindFirstObjectByType<ARAnchorManager>();
@@ -240,6 +242,8 @@ namespace CADInspection.Detection
         {
             ClearLockedInspection();
 
+            Transform anchorTransform = null;
+
             // 1. Attach ARAnchor to the physical plane
             if (m_AnchorManager != null)
             {
@@ -259,11 +263,13 @@ namespace CADInspection.Detection
                     GameObject anchorObj = new GameObject("Locked_QC_Anchor");
                     anchorObj.transform.position = m_CurrentAlignmentPose.position;
                     anchorObj.transform.rotation = m_CurrentAlignmentPose.rotation;
-                    m_ActiveAnchor = anchorObj.AddComponent<ARAnchor>();
+                    // Do not call AddComponent<ARAnchor>() without a running subsystem to avoid MissingReferenceException
+                    anchorTransform = anchorObj.transform;
                 }
             }
 
-            Transform anchorTransform = m_ActiveAnchor != null ? m_ActiveAnchor.transform : null;
+            if (anchorTransform == null)
+                anchorTransform = m_ActiveAnchor != null ? m_ActiveAnchor.transform : null;
 
             // 2. Realistic metrology values based on CAD nominals
             float actualLen = m_LengthMm + Random.Range(-0.2f, 0.2f);
@@ -288,7 +294,15 @@ namespace CADInspection.Detection
         {
             if (m_ActiveAnchor != null)
             {
-                Destroy(m_ActiveAnchor.gameObject);
+                NoteMarkerTracker.SafeClearAnchorManagerInstanceIfInvalid();
+                if (m_AnchorManager != null && m_AnchorManager.enabled)
+                {
+                    try { m_AnchorManager.TryRemoveAnchor(m_ActiveAnchor); } catch { }
+                }
+                if (m_ActiveAnchor != null && m_ActiveAnchor.gameObject != null)
+                {
+                    Destroy(m_ActiveAnchor.gameObject);
+                }
                 m_ActiveAnchor = null;
             }
 
@@ -315,10 +329,14 @@ namespace CADInspection.Detection
 
             Shader shader = Shader.Find("Universal Render Pipeline/Unlit") 
                          ?? Shader.Find("Hidden/Internal-Colored") 
-                         ?? Shader.Find("Sprites/Default");
-            Material lineMat = new Material(shader);
-            lineMat.color = m_GuideColor;
-            if (lineMat.HasProperty("_BaseColor")) lineMat.SetColor("_BaseColor", m_GuideColor);
+                         ?? Shader.Find("Sprites/Default")
+                         ?? Shader.Find("Mobile/Particles/Alpha Blended");
+            Material lineMat = shader != null ? new Material(shader) : null;
+            if (lineMat != null)
+            {
+                lineMat.color = m_GuideColor;
+                if (lineMat.HasProperty("_BaseColor")) lineMat.SetColor("_BaseColor", m_GuideColor);
+            }
 
             float hx = (m_WidthMm / 1000f) * 0.5f;
             float hy = (m_ThicknessMm / 1000f);

@@ -173,13 +173,23 @@ namespace CADInspection.Detection
                 }
             }
 
-            result.corners = new Vector2[4];
+            var centroid = new Vector2((float)mx + 0.5f, (float)my + 0.5f);
+            var rough = new Vector2[4];
             for (int k = 0; k < 4; k++)
             {
                 // push half a pixel outward so the corner sits on the blob edge, not a pixel centre
-                Vector2 outward = (bestPos[k] - new Vector2((float)mx + 0.5f, (float)my + 0.5f)).normalized * 0.5f;
-                Vector2 p = bestPos[k] + outward;
-                result.corners[k] = new Vector2(p.x / width, p.y / height);
+                rough[k] = bestPos[k] + (bestPos[k] - centroid).normalized * 0.5f;
+            }
+
+            // 6. Sub-pixel corners: fit a straight line through the boundary pixels of each side and intersect
+            //    neighbouring sides. Each corner then depends on dozens of pixels instead of one, which removes
+            //    most of the frame-to-frame jitter of a single extreme pixel.
+            Vector2[] refined = RefineCornersWithEdgeLines(labels, bestLabel, width, height, rough, centroid);
+
+            result.corners = new Vector2[4];
+            for (int k = 0; k < 4; k++)
+            {
+                result.corners[k] = new Vector2(refined[k].x / width, refined[k].y / height);
             }
             result.center = (result.corners[0] + result.corners[1] + result.corners[2] + result.corners[3]) * 0.25f;
 
@@ -252,6 +262,97 @@ namespace CADInspection.Detection
             float hue = Mathf.Atan2(sumH[best].y, sumH[best].x) / (Mathf.PI * 2f);
             if (hue < 0f) hue += 1f;
             return Color.HSVToRGB(hue, sumS[best] / weight[best], sumV[best] / weight[best]);
+        }
+
+        /// <summary>
+        /// Fits a line to the boundary pixels of each of the 4 sides (ignoring the rounded ends near the corners)
+        /// and returns the intersections of neighbouring lines. Falls back to the rough corner when a side has too
+        /// few points or the intersection lands far away. Coordinates are in pixels (origin bottom-left).
+        /// </summary>
+        private static Vector2[] RefineCornersWithEdgeLines(int[] labels, int label, int w, int h, Vector2[] rough, Vector2 centroid)
+        {
+            const float EndTrim = 0.12f;       // ignore the first/last 12% of each side (corner rounding)
+            const float MaxEdgeDistance = 3f;  // boundary pixels further than this from the rough side are noise
+            const float MaxCornerShift = 4f;   // refined corner must stay near the rough one
+
+            var points = new List<Vector2>[4];
+            for (int k = 0; k < 4; k++) points[k] = new List<Vector2>();
+
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    int i = y * w + x;
+                    if (labels[i] != label) continue;
+                    bool boundary = x == 0 || y == 0 || x == w - 1 || y == h - 1 ||
+                                    labels[i - 1] != label || labels[i + 1] != label ||
+                                    labels[i - w] != label || labels[i + w] != label;
+                    if (!boundary) continue;
+
+                    var p = new Vector2(x + 0.5f, y + 0.5f);
+                    int bestEdge = -1;
+                    float bestDist = float.MaxValue, bestT = 0f;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        Vector2 a = rough[k], b = rough[(k + 1) % 4];
+                        Vector2 ab = b - a;
+                        float len2 = ab.sqrMagnitude;
+                        if (len2 < 1e-4f) continue;
+                        float t = Vector2.Dot(p - a, ab) / len2;
+                        float d = Vector2.Distance(p, a + ab * Mathf.Clamp01(t));
+                        if (d < bestDist) { bestDist = d; bestEdge = k; bestT = t; }
+                    }
+                    if (bestEdge < 0 || bestDist > MaxEdgeDistance || bestT < EndTrim || bestT > 1f - EndTrim) continue;
+                    points[bestEdge].Add(p);
+                }
+            }
+
+            // Fit each side: centroid + principal direction; shift half a pixel outward onto the real edge.
+            var linePoint = new Vector2[4];
+            var lineDir = new Vector2[4];
+            var lineOk = new bool[4];
+            for (int k = 0; k < 4; k++)
+            {
+                var pts = points[k];
+                if (pts.Count < 4) continue;
+                Vector2 c = Vector2.zero;
+                foreach (var p in pts) c += p;
+                c /= pts.Count;
+                float sxx = 0, syy = 0, sxy = 0;
+                foreach (var p in pts) { Vector2 d = p - c; sxx += d.x * d.x; syy += d.y * d.y; sxy += d.x * d.y; }
+                float ang = 0.5f * Mathf.Atan2(2f * sxy, sxx - syy);
+                var dir = new Vector2(Mathf.Cos(ang), Mathf.Sin(ang));
+                var normal = new Vector2(-dir.y, dir.x);
+                if (Vector2.Dot(normal, c - centroid) < 0f) normal = -normal;
+                linePoint[k] = c + normal * 0.5f;
+                lineDir[k] = dir;
+                lineOk[k] = true;
+            }
+
+            var refined = new Vector2[4];
+            for (int k = 0; k < 4; k++)
+            {
+                int prev = (k + 3) % 4; // side (k-1 -> k) and side (k -> k+1) meet at corner k
+                refined[k] = rough[k];
+                if (!lineOk[prev] || !lineOk[k]) continue;
+                if (TryIntersect(linePoint[prev], lineDir[prev], linePoint[k], lineDir[k], out Vector2 hit) &&
+                    Vector2.Distance(hit, rough[k]) <= MaxCornerShift)
+                {
+                    refined[k] = hit;
+                }
+            }
+            return refined;
+        }
+
+        private static bool TryIntersect(Vector2 p1, Vector2 d1, Vector2 p2, Vector2 d2, out Vector2 hit)
+        {
+            float denom = d1.x * d2.y - d1.y * d2.x;
+            hit = default;
+            if (Mathf.Abs(denom) < 1e-4f) return false; // parallel
+            Vector2 diff = p2 - p1;
+            float t = (diff.x * d2.y - diff.y * d2.x) / denom;
+            hit = p1 + d1 * t;
+            return true;
         }
 
         private static bool[] Dilate(bool[] src, int w, int h)

@@ -226,9 +226,9 @@ namespace CADInspection.Editor
                         "Shows what the detector sees (magenta = cover colour) in the top-left corner of the app"), m_ShowDetectionDebug);
                     m_FlipCameraImage = EditorGUILayout.Toggle(new GUIContent("Flip Camera Image (debug)",
                         "Only if the debug thumbnail is upside down compared with the screen"), m_FlipCameraImage);
-                    m_RefineAfterLock = EditorGUILayout.Toggle(new GUIContent("Keep Outline On Note After LOCK",
-                        "After LOCK, keep checking the notebook in view and pull the outline back onto it, so AR tracking " +
-                        "drift does not make it slide off when you move the phone"), m_RefineAfterLock);
+                    m_RefineAfterLock = EditorGUILayout.Toggle(new GUIContent("Fix Large Drift After LOCK",
+                        "After LOCK the outline stays frozen. Only if the notebook is seen clearly off (more than 2.5 cm or 6°) " +
+                        "for a full second is it moved back once, smoothly. Turn off for a completely fixed outline."), m_RefineAfterLock);
                 }
 
                 Color.RGBToHSV(m_CoverColor, out float coverH, out float coverS, out _);

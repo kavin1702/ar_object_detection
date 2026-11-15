@@ -27,10 +27,24 @@ namespace CADInspection.Detection
         }
 
         private const float CaptureIntervalSeconds = 0.15f;
-        private const float FreshForSeconds = 0.6f;
-        private const int GridWidth = 96;
+        private const float FreshForSeconds = 1.5f;     // keep holding the last good pose through short blurry moves
+        private const int GridWidth = 144;              // ~4 mm per grid pixel at 50 cm
         private const float MinSizeRatio = 0.6f;
         private const float MaxSizeRatio = 1.6f;
+
+        // Only measure while the phone is reasonably still: frames taken while moving are blurred and the
+        // camera pose is less certain, which is what made the box shake and the locked outline wander.
+        private const float MaxSteadyDegreesPerSecond = 25f;
+        private const float MaxSteadyMetersPerSecond = 0.25f;
+
+        // Pose filter
+        private const float FilterBlend = 0.3f;          // share of a new reading taken into the filtered pose
+        private const float FilterDeadZoneMeters = 0.002f;
+        private const float FilterDeadZoneDegrees = 0.7f;
+        private const float NewPlacementMeters = 0.06f;  // bigger jumps need two agreeing readings (outlier guard)
+        private const float NewPlacementDegrees = 20f;
+        private const int LockSampleCount = 15;
+        private const float LockSampleMaxAge = 2.5f;
 
         [SerializeField] private NoteMarkerTracker m_Tracker;
         [SerializeField] private ARCameraManager m_CameraManager;
@@ -44,9 +58,23 @@ namespace CADInspection.Detection
         private float m_NextCaptureTime;
         private static readonly List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
 
-        private Pose m_LastPose;
+        private Pose m_LastPose;          // raw pose of the latest reading
         private TrackableId m_LastPlaneId = TrackableId.invalidId;
         private float m_LastFoundTime = -10f;
+
+        private bool m_HasFiltered;
+        private Pose m_FilteredPose;
+        private bool m_HasPendingJump;
+        private Pose m_PendingJump;
+        private readonly List<(Pose pose, float time)> m_Samples = new List<(Pose, float)>();
+
+        private bool m_HasPrevCamera;
+        private Vector3 m_PrevCameraPos;
+        private Quaternion m_PrevCameraRot;
+        private float m_PrevCameraTime;
+
+        /// <summary>True when the last capture was skipped because the phone was moving too fast.</summary>
+        public bool IsCameraMoving { get; private set; }
 
         private Texture2D m_DebugTexture;
         private bool[] m_DebugMask;
@@ -60,12 +88,137 @@ namespace CADInspection.Detection
         private NoteMarkerProfile Profile => m_Tracker != null ? m_Tracker.Profile : null;
         private bool FeatureOn => Profile != null && Profile.autoDetectByColor;
 
-        /// <summary>Latest notebook pose (centre on the table, Z along the long edge), if found recently.</summary>
+        /// <summary>
+        /// Smoothed notebook pose (centre on the table, Z along the long edge), if found recently.
+        /// Filtered over several steady readings, so it does not shake from frame to frame.
+        /// </summary>
         public bool TryGetFreshPose(out Pose pose, out TrackableId planeId)
         {
-            pose = m_LastPose;
+            pose = m_FilteredPose;
             planeId = m_LastPlaneId;
-            return FeatureOn && CurrentState == State.Found && Time.unscaledTime - m_LastFoundTime <= FreshForSeconds;
+            return FeatureOn && m_HasFiltered && Time.unscaledTime - m_LastFoundTime <= FreshForSeconds &&
+                   (CurrentState == State.Found || IsCameraMoving);
+        }
+
+        /// <summary>
+        /// Best pose for LOCK: the median of the recent steady readings that agree with the filtered pose,
+        /// so a single bad reading at the moment of LOCK cannot bake an error into the locked outline.
+        /// </summary>
+        public bool TryGetLockPose(out Pose pose)
+        {
+            pose = m_FilteredPose;
+            if (!m_HasFiltered) return false;
+
+            float now = Time.unscaledTime;
+            var xs = new List<float>(); var ys = new List<float>(); var zs = new List<float>();
+            Vector3 up = m_FilteredPose.up;
+            Vector3 forwardSum = Vector3.zero;
+            foreach (var s in m_Samples)
+            {
+                if (now - s.time > LockSampleMaxAge) continue;
+                if (Vector3.Distance(s.pose.position, m_FilteredPose.position) > 0.03f) continue;
+                xs.Add(s.pose.position.x); ys.Add(s.pose.position.y); zs.Add(s.pose.position.z);
+                forwardSum += Vector3.ProjectOnPlane(s.pose.forward, up).normalized;
+            }
+            if (xs.Count < 3 || forwardSum.sqrMagnitude < 1e-6f) return true; // not enough history: filtered pose
+
+            pose = new Pose(new Vector3(Median(xs), Median(ys), Median(zs)), Quaternion.LookRotation(forwardSum.normalized, up));
+            return true;
+        }
+
+        private static float Median(List<float> values)
+        {
+            values.Sort();
+            int n = values.Count;
+            return n % 2 == 1 ? values[n / 2] : 0.5f * (values[n / 2 - 1] + values[n / 2]);
+        }
+
+        /// <summary>Forget the filter, e.g. on RESCAN, so the next notebook is found from scratch.</summary>
+        public void ResetFilter()
+        {
+            m_HasFiltered = false;
+            m_HasPendingJump = false;
+            m_Samples.Clear();
+        }
+
+        // Keep each reading's forward on the same side as the filtered pose (a rectangle looks the same
+        // rotated by 180°, so without this the box could flip between readings).
+        private Pose AlignYaw(Pose raw)
+        {
+            if (!m_HasFiltered) return raw;
+            Quaternion flipped = raw.rotation * Quaternion.Euler(0f, 180f, 0f);
+            return Quaternion.Angle(m_FilteredPose.rotation, flipped) < Quaternion.Angle(m_FilteredPose.rotation, raw.rotation)
+                ? new Pose(raw.position, flipped)
+                : raw;
+        }
+
+        private void AcceptReading(Pose raw)
+        {
+            raw = AlignYaw(raw);
+            float now = Time.unscaledTime;
+
+            if (!m_HasFiltered)
+            {
+                m_FilteredPose = raw;
+                m_HasFiltered = true;
+            }
+            else
+            {
+                float d = Vector3.Distance(m_FilteredPose.position, raw.position);
+                float a = Quaternion.Angle(m_FilteredPose.rotation, raw.rotation);
+                if (d > NewPlacementMeters || a > NewPlacementDegrees)
+                {
+                    // Notebook moved (or a bad reading): accept only when two readings in a row agree.
+                    if (m_HasPendingJump && Vector3.Distance(m_PendingJump.position, raw.position) < 0.03f)
+                    {
+                        m_FilteredPose = raw;
+                        m_Samples.Clear();
+                        m_HasPendingJump = false;
+                    }
+                    else
+                    {
+                        m_PendingJump = raw;
+                        m_HasPendingJump = true;
+                        return;
+                    }
+                }
+                else
+                {
+                    m_HasPendingJump = false;
+                    if (d > FilterDeadZoneMeters || a > FilterDeadZoneDegrees)
+                    {
+                        m_FilteredPose = new Pose(
+                            Vector3.Lerp(m_FilteredPose.position, raw.position, FilterBlend),
+                            Quaternion.Slerp(m_FilteredPose.rotation, raw.rotation, FilterBlend));
+                    }
+                }
+            }
+
+            m_Samples.Add((raw, now));
+            if (m_Samples.Count > LockSampleCount) m_Samples.RemoveAt(0);
+            m_LastFoundTime = now;
+            FoundCount++;
+        }
+
+        private bool CameraIsSteady()
+        {
+            if (m_Camera == null) return true;
+            Vector3 pos = m_Camera.transform.position;
+            Quaternion rot = m_Camera.transform.rotation;
+            float now = Time.unscaledTime;
+            bool steady = true;
+            if (m_HasPrevCamera)
+            {
+                float dt = Mathf.Max(1e-3f, now - m_PrevCameraTime);
+                float degPerSec = Quaternion.Angle(m_PrevCameraRot, rot) / dt;
+                float mPerSec = Vector3.Distance(m_PrevCameraPos, pos) / dt;
+                steady = degPerSec <= MaxSteadyDegreesPerSecond && mPerSec <= MaxSteadyMetersPerSecond;
+            }
+            m_PrevCameraPos = pos;
+            m_PrevCameraRot = rot;
+            m_PrevCameraTime = now;
+            m_HasPrevCamera = true;
+            return steady;
         }
 
         /// <summary>Short guidance for the HUD, or null when there is nothing specific to say.</summary>
@@ -128,6 +281,10 @@ namespace CADInspection.Detection
             if (Time.unscaledTime < m_NextCaptureTime) return;
             m_NextCaptureTime = Time.unscaledTime + CaptureIntervalSeconds;
 
+            // Skip blurred frames while the phone moves fast; the last good pose is held meanwhile.
+            IsCameraMoving = !CameraIsSteady();
+            if (IsCameraMoving) return;
+
             if (!CaptureScreenAlignedImage())
             {
                 CurrentState = State.WaitingForCamera;
@@ -148,8 +305,7 @@ namespace CADInspection.Detection
             CurrentState = ReconstructPose(result);
             if (CurrentState == State.Found)
             {
-                m_LastFoundTime = Time.unscaledTime;
-                FoundCount++;
+                AcceptReading(m_LastPose);
             }
         }
 
@@ -164,7 +320,7 @@ namespace CADInspection.Detection
 
             using (image)
             {
-                int factor = Mathf.Max(1, image.width / 192);
+                int factor = Mathf.Max(1, image.width / 320); // keep enough pixels for the 144-wide screen grid
                 var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32, XRCpuImage.Transformation.None)
                 {
                     outputDimensions = new Vector2Int(image.width / factor, image.height / factor)

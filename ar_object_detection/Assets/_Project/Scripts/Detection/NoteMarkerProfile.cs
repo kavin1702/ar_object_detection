@@ -40,8 +40,8 @@ namespace CADInspection.Detection
         [Range(4f, 60f)]
         public float colorHueTolerance = 18f;
 
-        [Tooltip("After LOCK, keep checking the notebook in view and gently pull the outline back onto it, " +
-                 "so it stays on the real notebook while you move the phone (corrects AR tracking drift)")]
+        [Tooltip("After LOCK the outline stays frozen. Only a large drift (> 2.5 cm or 6°) seen for a full second " +
+                 "is corrected once, smoothly. Turn off for a completely fixed outline.")]
         public bool refineAfterLock = true;
 
         [Tooltip("Show a small thumbnail of what the detector sees (magenta = cover colour) in the app")]

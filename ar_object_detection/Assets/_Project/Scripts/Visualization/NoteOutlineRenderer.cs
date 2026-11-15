@@ -1,25 +1,34 @@
-using System;
 using UnityEngine;
 using CADInspection.Detection;
 
 namespace CADInspection.Visualization
 {
     /// <summary>
-    /// Projects the 3D outline of the note model and displays the dimension badge
-    /// floating directly above the model in AR space.
-    /// Billboarded to face the camera from all angles.
-    /// Completely free of any pass/fail, test, or QC text.
+    /// Projects the 3D outline of the physical note and draws engineering-style edge dimension callouts:
+    /// Width (W) along the far top edge, Length (L) along the left top edge and Depth (T) on the
+    /// front-right vertical edge, each with an arrowed dimension line and a camera-facing label.
+    /// Local frame: X = width, Y = up (thickness), Z = length; the user stands on the -Z side when aligning.
     /// </summary>
     public class NoteOutlineRenderer : MonoBehaviour
     {
+        public const string OutlineRootName = "Note_Outline_Root";
+
+        private const float LabelLineHeightMeters = 0.0095f;   // ~9.5 mm text line height at 40 cm (labels scale with distance)
+        private const float LabelLiftMeters = 0.020f;          // label sits just above its dimension line
+        private const float DepthLabelSideMeters = 0.046f;     // depth label sits beside the vertical edge
+
         [Header("Active Profile")]
         [SerializeField] private NoteMarkerProfile m_Profile;
 
         private GameObject m_OutlineRoot;
-        private Material m_LineMaterial;
+        private Material m_OutlineMaterial;
+        private Material m_DimensionLineMaterial;
         private Material m_BackplateMaterial;
 
         public bool IsShowing => m_OutlineRoot != null;
+
+        /// <summary>Root of the locked outline (parented to the anchor), or null when hidden.</summary>
+        public Transform OutlineRoot => m_OutlineRoot != null ? m_OutlineRoot.transform : null;
         public NoteMarkerProfile Profile => m_Profile;
 
         private void Awake()
@@ -33,35 +42,22 @@ namespace CADInspection.Visualization
             HideOutline();
         }
 
-        public static void SafeDestroy(UnityEngine.Object obj)
+        public static void SafeDestroy(Object obj)
         {
             if (obj == null) return;
-            if (Application.isPlaying)
-                Destroy(obj);
-            else
-                DestroyImmediate(obj);
+            if (Application.isPlaying) Destroy(obj);
+            else DestroyImmediate(obj);
         }
 
+        /// <summary>Removes outline roots left behind in the open scene (editor only).</summary>
         public static void PurgeExistingOutlines()
         {
 #if UNITY_EDITOR
-            string[] targetNames = new string[]
+            foreach (var obj in Resources.FindObjectsOfTypeAll<GameObject>())
             {
-                "Note_Outline_Root",
-                "CAD_Wireframe_Root",
-                "Inspected_Notebook_Body",
-                "Notebook_Body"
-            };
-
-            foreach (var name in targetNames)
-            {
-                var objs = Resources.FindObjectsOfTypeAll<GameObject>();
-                foreach (var obj in objs)
+                if (obj != null && obj.name == OutlineRootName && obj.scene.isLoaded)
                 {
-                    if (obj != null && obj.name == name && obj.scene.isLoaded)
-                    {
-                        SafeDestroy(obj);
-                    }
+                    SafeDestroy(obj);
                 }
             }
 #endif
@@ -69,31 +65,12 @@ namespace CADInspection.Visualization
 
         public void InitializeMaterials()
         {
-            Shader unlitShader = Shader.Find("Universal Render Pipeline/Unlit") 
-                              ?? Shader.Find("Sprites/Default") 
-                              ?? Shader.Find("Mobile/Particles/Alpha Blended")
-                              ?? Shader.Find("Hidden/Internal-Colored");
+            Color outline = m_Profile != null ? m_Profile.outlineColor : new Color(0.12f, 0.95f, 0.42f, 1f);
+            Color dimension = m_Profile != null ? m_Profile.dimensionTextColor : Color.white;
 
-            if (unlitShader != null)
-            {
-                m_LineMaterial = new Material(unlitShader);
-                Color wireColor = m_Profile != null ? m_Profile.outlineColor : new Color(0.12f, 0.95f, 0.42f, 1f);
-                m_LineMaterial.color = wireColor;
-                if (m_LineMaterial.HasProperty("_BaseColor"))
-                    m_LineMaterial.SetColor("_BaseColor", wireColor);
-            }
-
-            Shader transparentShader = Shader.Find("Universal Render Pipeline/Unlit") 
-                                    ?? Shader.Find("Sprites/Default")
-                                    ?? Shader.Find("Hidden/Internal-Colored");
-            if (transparentShader != null)
-            {
-                m_BackplateMaterial = new Material(transparentShader);
-                Color bgColor = new Color(0.04f, 0.08f, 0.12f, 0.88f);
-                m_BackplateMaterial.color = bgColor;
-                if (m_BackplateMaterial.HasProperty("_BaseColor"))
-                    m_BackplateMaterial.SetColor("_BaseColor", bgColor);
-            }
+            m_OutlineMaterial = ARVisualMaterials.CreateUnlit(outline);
+            m_DimensionLineMaterial = ARVisualMaterials.CreateUnlit(new Color(dimension.r, dimension.g, dimension.b, 0.95f), transparent: true);
+            m_BackplateMaterial = ARVisualMaterials.CreateUnlit(new Color(0.08f, 0.09f, 0.10f, 0.82f), transparent: true);
         }
 
         public void SetProfile(NoteMarkerProfile profile)
@@ -103,32 +80,16 @@ namespace CADInspection.Visualization
         }
 
         /// <summary>
-        /// Projects the note outline and dimension badge parented to the tracked anchor.
-        /// If anchorAtTopCover is true (image marker tracking), Y=0 is top cover and Y=-thk is desk.
-        /// If anchorAtTopCover is false (table plane placement), Y=0 is desk and Y=+thk is top cover.
+        /// Projects the note outline and dimension callouts, parented to the tracked anchor.
+        /// If anchorAtTopCover is true (image marker tracking), Y=0 is the top cover and Y=-thickness is the desk.
+        /// If anchorAtTopCover is false (table plane placement), Y=0 is the desk and Y=+thickness is the top cover.
         /// </summary>
         public void ShowOutline(Transform anchorTransform, Vector3 position, Quaternion rotation, NoteMarkerProfile profile = null, bool anchorAtTopCover = false)
         {
-            if (profile != null)
+            if (profile != null && profile != m_Profile)
             {
                 m_Profile = profile;
                 InitializeMaterials();
-            }
-
-            HideOutline();
-
-            m_OutlineRoot = new GameObject("Note_Outline_Root");
-
-            if (anchorTransform != null)
-            {
-                m_OutlineRoot.transform.SetParent(anchorTransform, false);
-                m_OutlineRoot.transform.localPosition = Vector3.zero;
-                m_OutlineRoot.transform.localRotation = Quaternion.identity;
-            }
-            else
-            {
-                m_OutlineRoot.transform.position = position;
-                m_OutlineRoot.transform.rotation = rotation;
             }
 
             if (m_Profile == null)
@@ -137,32 +98,46 @@ namespace CADInspection.Visualization
                 if (tracker != null && tracker.Profile != null)
                 {
                     m_Profile = tracker.Profile;
+                    InitializeMaterials();
                 }
             }
 
             if (m_Profile == null)
             {
-                Debug.LogError("[NoteOutlineRenderer] No NoteMarkerProfile assigned. Please configure the note dimensions in 'Tools > Note AR Setup Tool'.");
+                Debug.LogError("[NoteOutlineRenderer] No NoteMarkerProfile assigned. Configure the note in 'Tools > Note AR Setup Tool'.");
                 return;
             }
 
-            float lenMm = m_Profile.lengthMm;
-            float widMm = m_Profile.widthMm;
-            float thkMm = m_Profile.thicknessMm;
-            float lineWidth = m_Profile.lineWidthMm / 1000f;
+            if (m_OutlineMaterial == null) InitializeMaterials();
 
-            // Build 3D outline box
-            BuildOutlineBox(widMm, lenMm, thkMm, lineWidth, anchorAtTopCover);
+            HideOutline();
 
-            // Build Dimension Floating Badge directly ABOVE the note model
-            BuildDimensionBadgeAboveModel(widMm, lenMm, thkMm, anchorAtTopCover);
+            m_OutlineRoot = new GameObject(OutlineRootName);
+            if (anchorTransform != null)
+            {
+                m_OutlineRoot.transform.SetParent(anchorTransform, false);
+                m_OutlineRoot.transform.localPosition = Vector3.zero;
+                m_OutlineRoot.transform.localRotation = Quaternion.identity;
+            }
+            else
+            {
+                m_OutlineRoot.transform.SetPositionAndRotation(position, rotation);
+            }
 
-            // Optional 3D Model Prefab overlay
-            if (m_Profile != null && m_Profile.optionalModelPrefab != null)
+            float w = m_Profile.widthMm / 1000f;
+            float l = m_Profile.lengthMm / 1000f;
+            float t = m_Profile.thicknessMm / 1000f;
+            float yBottom = anchorAtTopCover ? -t : 0f;
+            float yTop = anchorAtTopCover ? 0f : t;
+            float lineWidth = Mathf.Max(0.0005f, m_Profile.lineWidthMm / 1000f);
+
+            BuildOutlineBox(m_OutlineRoot.transform, w * 0.5f, l * 0.5f, yBottom, yTop, lineWidth);
+            BuildEdgeCallouts(m_OutlineRoot.transform, w * 0.5f, l * 0.5f, yBottom, yTop, lineWidth);
+
+            if (m_Profile.optionalModelPrefab != null)
             {
                 GameObject modelInstance = Instantiate(m_Profile.optionalModelPrefab, m_OutlineRoot.transform);
-                float centerY = anchorAtTopCover ? -(thkMm / 1000f) * 0.5f : (thkMm / 1000f) * 0.5f;
-                modelInstance.transform.localPosition = new Vector3(0f, centerY, 0f);
+                modelInstance.transform.localPosition = new Vector3(0f, (yBottom + yTop) * 0.5f, 0f);
                 modelInstance.transform.localRotation = Quaternion.identity;
             }
         }
@@ -176,170 +151,179 @@ namespace CADInspection.Visualization
             }
         }
 
-        private void BuildOutlineBox(float widthMm, float lengthMm, float thicknessMm, float lineWidth, bool anchorAtTopCover)
+        /// <summary>
+        /// Builds the same outline and Width/Length/Depth callouts under <paramref name="parent"/> (desk at Y=0)
+        /// for the live alignment preview, so the user sees the dimensions while scanning, before LOCK.
+        /// Does not touch the locked outline. Returns the preview root (child "DimensionCallouts" holds the labels).
+        /// </summary>
+        public GameObject BuildPreview(Transform parent, NoteMarkerProfile profile)
         {
-            float hx = (widthMm / 1000f) * 0.5f;
-            float hy = (thicknessMm / 1000f);
-            float hz = (lengthMm / 1000f) * 0.5f;
-
-            float yBottom = anchorAtTopCover ? -hy : 0f;
-            float yTop = anchorAtTopCover ? 0f : hy;
-
-            // 8 corners of the 3D note model
-            Vector3[] corners = new Vector3[8]
+            if (profile != null && profile != m_Profile)
             {
-                new Vector3(-hx, yBottom, -hz), // 0: Bottom Back Left
-                new Vector3( hx, yBottom, -hz), // 1: Bottom Back Right
-                new Vector3( hx, yBottom,  hz), // 2: Bottom Front Right
-                new Vector3(-hx, yBottom,  hz), // 3: Bottom Front Left
-                new Vector3(-hx, yTop,    -hz), // 4: Top Back Left
-                new Vector3( hx, yTop,    -hz), // 5: Top Back Right
-                new Vector3( hx, yTop,     hz), // 6: Top Front Right
-                new Vector3(-hx, yTop,     hz)  // 7: Top Front Left
+                m_Profile = profile;
+                InitializeMaterials();
+            }
+            if (m_Profile == null) return null;
+            if (m_OutlineMaterial == null) InitializeMaterials();
+
+            var root = new GameObject("Note_Preview_Root");
+            root.transform.SetParent(parent, false);
+
+            float w = m_Profile.widthMm / 1000f;
+            float l = m_Profile.lengthMm / 1000f;
+            float t = m_Profile.thicknessMm / 1000f;
+            float lineWidth = Mathf.Max(0.0005f, m_Profile.lineWidthMm / 1000f);
+
+            BuildOutlineBox(root.transform, w * 0.5f, l * 0.5f, 0f, t, lineWidth);
+            BuildEdgeCallouts(root.transform, w * 0.5f, l * 0.5f, 0f, t, lineWidth);
+            return root;
+        }
+
+        private void BuildOutlineBox(Transform parent, float hx, float hz, float yBottom, float yTop, float lineWidth)
+        {
+            Vector3[] corners =
+            {
+                new Vector3(-hx, yBottom, -hz), // 0: Bottom Front Left
+                new Vector3( hx, yBottom, -hz), // 1: Bottom Front Right
+                new Vector3( hx, yBottom,  hz), // 2: Bottom Back Right
+                new Vector3(-hx, yBottom,  hz), // 3: Bottom Back Left
+                new Vector3(-hx, yTop,    -hz), // 4: Top Front Left
+                new Vector3( hx, yTop,    -hz), // 5: Top Front Right
+                new Vector3( hx, yTop,     hz), // 6: Top Back Right
+                new Vector3(-hx, yTop,     hz)  // 7: Top Back Left
             };
 
-            int[,] edges = new int[12, 2]
+            int[,] edges =
             {
-                {0,1}, {1,2}, {2,3}, {3,0}, // Bottom base rectangle (on table)
-                {4,5}, {5,6}, {6,7}, {7,4}, // Top cover rectangle (on marker)
-                {0,4}, {1,5}, {2,6}, {3,7}  // 4 Vertical thickness corner pillars
+                {0,1}, {1,2}, {2,3}, {3,0}, // bottom rectangle (on the desk)
+                {4,5}, {5,6}, {6,7}, {7,4}, // top rectangle (cover)
+                {0,4}, {1,5}, {2,6}, {3,7}  // vertical thickness edges
             };
+
+            var boxRoot = new GameObject("Outline");
+            boxRoot.transform.SetParent(parent, false);
 
             for (int i = 0; i < 12; i++)
             {
-                GameObject edgeObj = new GameObject($"Outline_Edge_{i}");
-                edgeObj.transform.SetParent(m_OutlineRoot.transform, false);
-
-                LineRenderer lr = edgeObj.AddComponent<LineRenderer>();
-                lr.material = m_LineMaterial;
-                lr.startWidth = lineWidth;
-                lr.endWidth = lineWidth;
-                lr.positionCount = 2;
-                lr.useWorldSpace = false;
-                lr.SetPosition(0, corners[edges[i, 0]]);
-                lr.SetPosition(1, corners[edges[i, 1]]);
-                lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                lr.receiveShadows = false;
+                AddLine(boxRoot.transform, $"Outline_Edge_{i}", corners[edges[i, 0]], corners[edges[i, 1]], m_OutlineMaterial, lineWidth);
             }
 
-            // Optional corner accent nodes
-            if (m_Profile == null || m_Profile.showCornerNodes)
+            if (m_Profile.showCornerNodes)
             {
-                float nodeSize = lineWidth * 2.2f;
+                float nodeSize = lineWidth * 2.4f;
                 for (int i = 0; i < 8; i++)
                 {
-                    GameObject node = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                    GameObject node = GameObject.CreatePrimitive(PrimitiveType.Sphere);
                     node.name = $"Corner_Node_{i}";
-                    node.transform.SetParent(m_OutlineRoot.transform, false);
+                    node.transform.SetParent(boxRoot.transform, false);
                     node.transform.localPosition = corners[i];
                     node.transform.localScale = Vector3.one * nodeSize;
 
-                    Collider col = node.GetComponent<Collider>();
+                    var col = node.GetComponent<Collider>();
                     if (col != null) SafeDestroy(col);
 
-                    MeshRenderer mr = node.GetComponent<MeshRenderer>();
-                    if (mr != null) mr.material = m_LineMaterial;
+                    var mr = node.GetComponent<MeshRenderer>();
+                    mr.sharedMaterial = m_OutlineMaterial;
+                    mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    mr.receiveShadows = false;
                 }
             }
         }
 
-        /// <summary>
-        /// Builds the floating dimension badge positioned directly ABOVE the note model.
-        /// </summary>
-        private void BuildDimensionBadgeAboveModel(float widthMm, float lengthMm, float thicknessMm, bool anchorAtTopCover)
+        private void BuildEdgeCallouts(Transform parent, float hx, float hz, float yBottom, float yTop, float outlineWidth)
         {
-            float offsetMm = m_Profile != null ? m_Profile.dimensionHeightOffsetMm : 40f;
-            float offsetMeters = offsetMm / 1000f;
-            float topY = anchorAtTopCover ? 0f : (thicknessMm / 1000f);
+            float offset = Mathf.Max(0.005f, m_Profile.calloutOffsetMm / 1000f);
+            float dimWidth = Mathf.Max(0.0006f, outlineWidth * 0.4f);
+            Color dimColor = m_Profile.dimensionTextColor;
+            Material plate = m_Profile.showBackplate ? m_BackplateMaterial : null;
+            string format = "F" + Mathf.Clamp(m_Profile.decimals, 0, 2);
 
-            // Position is directly above the center of the top cover
-            Vector3 badgePos = new Vector3(0f, topY + offsetMeters, 0f);
+            var calloutRoot = new GameObject("DimensionCallouts");
+            calloutRoot.transform.SetParent(parent, false);
+            Transform root = calloutRoot.transform;
 
-            GameObject badgeObj = new GameObject("DimensionBadge_AboveModel");
-            badgeObj.transform.SetParent(m_OutlineRoot.transform, false);
-            badgeObj.transform.localPosition = badgePos;
-
-            // Billboard so the badge always faces the user's camera
-            badgeObj.AddComponent<BillboardLookAtCamera>();
-
-            // Leader line linking top-cover center to the floating badge
-            bool showLeader = m_Profile == null || m_Profile.showLeaderLine;
-            if (showLeader && offsetMeters > 0.015f)
+            // Width (W): along the far top edge (z = +hz), dimension line pushed further away (+Z).
             {
-                GameObject leaderObj = new GameObject("LeaderLine");
-                leaderObj.transform.SetParent(m_OutlineRoot.transform, false);
-
-                LineRenderer leaderLr = leaderObj.AddComponent<LineRenderer>();
-                leaderLr.material = m_LineMaterial;
-                float leaderWidth = (m_Profile != null ? m_Profile.lineWidthMm : 3.5f) * 0.5f / 1000f;
-                leaderLr.startWidth = leaderWidth;
-                leaderLr.endWidth = leaderWidth;
-                leaderLr.positionCount = 2;
-                leaderLr.useWorldSpace = false;
-                leaderLr.SetPosition(0, new Vector3(0f, topY, 0f));
-                leaderLr.SetPosition(1, new Vector3(0f, topY + offsetMeters - 0.012f, 0f));
-                leaderLr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                leaderLr.receiveShadows = false;
+                Vector3 a = new Vector3(-hx, yTop, hz + offset);
+                Vector3 b = new Vector3( hx, yTop, hz + offset);
+                if (m_Profile.showDimensionLines)
+                {
+                    DrawDimension(root, "Width", a, b, Vector3.forward, dimWidth);
+                    AddLine(root, "Width_Ext_L", new Vector3(-hx, yTop, hz), a + Vector3.forward * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                    AddLine(root, "Width_Ext_R", new Vector3( hx, yTop, hz), b + Vector3.forward * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                }
+                DimensionLabel.Create(root, (a + b) * 0.5f, Vector3.up * LabelLiftMeters,
+                    "Width (W)", $"{m_Profile.widthMm.ToString(format)} mm", dimColor, plate, LabelLineHeightMeters);
             }
 
-            // Format dimension text
-            string formattedText = GetFormattedDimensionString(lengthMm, widthMm, thicknessMm);
-
-            // Optional dark translucent backplate for contrast
-            bool showBackplate = m_Profile == null || m_Profile.showBackplate;
-            if (showBackplate)
+            // Length (L): along the left top edge (x = -hx), dimension line pushed outward (-X).
             {
-                GameObject backplate = GameObject.CreatePrimitive(PrimitiveType.Quad);
-                backplate.name = "Backplate";
-                backplate.transform.SetParent(badgeObj.transform, false);
-                backplate.transform.localPosition = new Vector3(0f, 0f, 0.002f); // Slightly behind text
-                backplate.transform.localRotation = Quaternion.identity;
-
-                float plateWidth = 0.16f;
-                float plateHeight = 0.052f;
-                backplate.transform.localScale = new Vector3(plateWidth, plateHeight, 1f);
-
-                Collider col = backplate.GetComponent<Collider>();
-                if (col != null) SafeDestroy(col);
-
-                MeshRenderer mr = backplate.GetComponent<MeshRenderer>();
-                if (mr != null) mr.material = m_BackplateMaterial;
+                Vector3 a = new Vector3(-hx - offset, yTop, -hz);
+                Vector3 b = new Vector3(-hx - offset, yTop,  hz);
+                if (m_Profile.showDimensionLines)
+                {
+                    DrawDimension(root, "Length", a, b, Vector3.left, dimWidth);
+                    AddLine(root, "Length_Ext_F", new Vector3(-hx, yTop, -hz), a + Vector3.left * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                    AddLine(root, "Length_Ext_B", new Vector3(-hx, yTop,  hz), b + Vector3.left * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                }
+                DimensionLabel.Create(root, (a + b) * 0.5f, Vector3.up * LabelLiftMeters,
+                    "Length (L)", $"{m_Profile.lengthMm.ToString(format)} mm", dimColor, plate, LabelLineHeightMeters);
             }
 
-            // 3D TextMesh for Dimension
-            GameObject textObj = new GameObject("DimensionText");
-            textObj.transform.SetParent(badgeObj.transform, false);
-            textObj.transform.localPosition = Vector3.zero;
-            textObj.transform.localRotation = Quaternion.identity;
-
-            TextMesh tm = textObj.AddComponent<TextMesh>();
-            tm.text = formattedText;
-            tm.fontSize = 32;
-            tm.characterSize = 0.0024f;
-            tm.alignment = TextAlignment.Center;
-            tm.anchor = TextAnchor.MiddleCenter;
-            tm.color = m_Profile != null ? m_Profile.dimensionTextColor : Color.white;
+            // Depth (T): on the front-right vertical edge (x = +hx, z = -hz), dimension line pushed outward (+X).
+            {
+                Vector3 a = new Vector3(hx + offset, yBottom, -hz);
+                Vector3 b = new Vector3(hx + offset, yTop,    -hz);
+                if (m_Profile.showDimensionLines)
+                {
+                    DrawDimension(root, "Depth", a, b, Vector3.right, dimWidth);
+                    AddLine(root, "Depth_Ext_Bottom", new Vector3(hx, yBottom, -hz), a + Vector3.right * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                    AddLine(root, "Depth_Ext_Top",    new Vector3(hx, yTop,    -hz), b + Vector3.right * offset * 0.25f, m_DimensionLineMaterial, dimWidth * 0.6f);
+                }
+                Vector3 mid = (a + b) * 0.5f;
+                DimensionLabel.Create(root, mid, Vector3.right * DepthLabelSideMeters,
+                    "Depth (T)", $"{m_Profile.thicknessMm.ToString(format)} mm", dimColor, plate, LabelLineHeightMeters);
+            }
         }
 
-        private string GetFormattedDimensionString(float lengthMm, float widthMm, float thicknessMm)
+        /// <summary>Dimension line from a to b with an arrowhead at each end, drawn in the plane of (b - a) and <paramref name="side"/>.</summary>
+        private void DrawDimension(Transform parent, string name, Vector3 a, Vector3 b, Vector3 side, float width)
         {
-            DimensionDisplayFormat format = m_Profile != null ? m_Profile.dimensionFormat : DimensionDisplayFormat.CompactWithLabels;
+            AddLine(parent, name + "_Line", a, b, m_DimensionLineMaterial, width);
 
-            switch (format)
-            {
-                case DimensionDisplayFormat.Compact:
-                    return $"{lengthMm:F0} × {widthMm:F0} × {thicknessMm:F0} mm";
+            Vector3 dir = (b - a);
+            float length = dir.magnitude;
+            if (length < 1e-4f) return;
+            dir /= length;
 
-                case DimensionDisplayFormat.Standard:
-                    return $"{lengthMm:F0} mm × {widthMm:F0} mm × {thicknessMm:F0} mm";
+            float head = Mathf.Min(0.008f, length * 0.3f);
+            Vector3 spread = side.normalized * head * 0.45f;
 
-                case DimensionDisplayFormat.Detailed:
-                    return $"L: {lengthMm:F0} mm  |  W: {widthMm:F0} mm  |  H: {thicknessMm:F0} mm";
+            AddLine(parent, name + "_ArrowA1", a, a + dir * head + spread, m_DimensionLineMaterial, width);
+            AddLine(parent, name + "_ArrowA2", a, a + dir * head - spread, m_DimensionLineMaterial, width);
+            AddLine(parent, name + "_ArrowB1", b, b - dir * head + spread, m_DimensionLineMaterial, width);
+            AddLine(parent, name + "_ArrowB2", b, b - dir * head - spread, m_DimensionLineMaterial, width);
+        }
 
-                case DimensionDisplayFormat.CompactWithLabels:
-                default:
-                    return $"<b>{lengthMm:F0} mm × {widthMm:F0} mm × {thicknessMm:F0} mm</b>\nL: {lengthMm:F0} mm   W: {widthMm:F0} mm   H: {thicknessMm:F0} mm";
-            }
+        private static LineRenderer AddLine(Transform parent, string name, Vector3 from, Vector3 to, Material material, float width)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+
+            var lr = go.AddComponent<LineRenderer>();
+            lr.sharedMaterial = material;
+            lr.startColor = Color.white; // colour comes from the material (vertex colour multiplies it on Sprites/Default)
+            lr.endColor = Color.white;
+            lr.startWidth = width;
+            lr.endWidth = width;
+            lr.positionCount = 2;
+            lr.useWorldSpace = false;
+            lr.numCapVertices = 2;
+            lr.SetPosition(0, from);
+            lr.SetPosition(1, to);
+            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            lr.receiveShadows = false;
+            return lr;
         }
     }
 }

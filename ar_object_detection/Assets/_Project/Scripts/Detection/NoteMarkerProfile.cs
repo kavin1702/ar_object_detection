@@ -1,19 +1,13 @@
 using UnityEngine;
+using UnityEngine.Serialization;
 using UnityEngine.XR.ARSubsystems;
 
 namespace CADInspection.Detection
 {
-    public enum DimensionDisplayFormat
-    {
-        Standard,           // "230 mm × 154 mm × 50 mm"
-        Detailed,           // "L: 230 mm | W: 154 mm | H: 50 mm"
-        CompactWithLabels,  // "230 mm × 154 mm × 50 mm\nL: 230 mm  W: 154 mm  H: 50 mm"
-        Compact             // "230 × 154 × 50 mm"
-    }
-
     /// <summary>
-    /// Persistent profile storing note marker image, real-world physical dimensions,
-    /// and visual outline/dimension styling.
+    /// Persistent profile storing the note marker image, real-world physical dimensions,
+    /// and the styling of the 3D outline and edge dimension callouts.
+    /// Created and edited through Tools > Note AR Setup Tool.
     /// </summary>
     [CreateAssetMenu(fileName = "CurrentNoteMarkerProfile", menuName = "CAD AR/Note Marker Profile")]
     public class NoteMarkerProfile : ScriptableObject
@@ -26,26 +20,57 @@ namespace CADInspection.Detection
         public XRReferenceImageLibrary imageLibrary;
 
         [Header("Physical Dimensions (mm)")]
-        [Tooltip("Length along Z axis in millimeters")]
-        public float lengthMm = 230f;
+        [Tooltip("Length along Z axis in millimeters (spine direction)")]
+        public float lengthMm = 210f;
 
         [Tooltip("Width along X axis in millimeters")]
-        public float widthMm = 154f;
+        public float widthMm = 148f;
 
-        [Tooltip("Thickness / Height along Y axis in millimeters")]
-        public float thicknessMm = 50f;
+        [Tooltip("Thickness / depth along Y axis in millimeters")]
+        public float thicknessMm = 20f;
+
+        [Header("Auto-Detect Note by Cover Colour")]
+        [Tooltip("Find the notebook in the camera view by its cover colour and snap the green box onto it")]
+        public bool autoDetectByColor = true;
+
+        [Tooltip("Cover colour, taken from the marker image by the Setup Tool")]
+        public Color coverColor = new Color(0.06f, 0.66f, 0.74f, 1f);
+
+        [Tooltip("How far the hue may differ from the cover colour, in degrees (raise for uneven lighting)")]
+        [Range(4f, 60f)]
+        public float colorHueTolerance = 18f;
+
+        [Tooltip("After LOCK, keep checking the notebook in view and gently pull the outline back onto it, " +
+                 "so it stays on the real notebook while you move the phone (corrects AR tracking drift)")]
+        public bool refineAfterLock = true;
+
+        [Tooltip("Show a small thumbnail of what the detector sees (magenta = cover colour) in the app")]
+        public bool showDetectionDebug = false;
+
+        [Tooltip("Only if the debug thumbnail looks upside down compared with the screen")]
+        public bool flipCameraImageVertically = false;
 
         [Header("Outline Styling")]
         public Color outlineColor = new Color(0.12f, 0.95f, 0.42f, 1f); // Vibrant AR Green
         public float lineWidthMm = 3.5f;
         public bool showCornerNodes = true;
 
-        [Header("Dimension Above Model")]
-        [Tooltip("Height offset above the top of the model in millimeters")]
-        public float dimensionHeightOffsetMm = 40f;
-        public DimensionDisplayFormat dimensionFormat = DimensionDisplayFormat.CompactWithLabels;
+        [Header("Edge Dimension Callouts")]
+        [Tooltip("How far the dimension arrows sit outside the notebook edges, in millimeters")]
+        [FormerlySerializedAs("dimensionHeightOffsetMm")]
+        public float calloutOffsetMm = 25f;
+
+        [Tooltip("Number of decimals shown in the callouts (reference style: 1 -> 148.0 mm)")]
+        [Range(0, 2)]
+        public int decimals = 1;
+
         public Color dimensionTextColor = Color.white;
-        public bool showLeaderLine = true;
+
+        [Tooltip("Draw the arrowed dimension lines and extension lines for each callout")]
+        [FormerlySerializedAs("showLeaderLine")]
+        public bool showDimensionLines = true;
+
+        [Tooltip("Dark plate behind each callout label for contrast")]
         public bool showBackplate = true;
 
         [Header("Optional 3D Mesh / Model Prefab")]

@@ -56,13 +56,12 @@ namespace CADInspection.Visualization
 
             if (plateMaterial != null)
             {
-                var plate = GameObject.CreatePrimitive(PrimitiveType.Quad);
-                plate.name = "Backplate";
-                var collider = plate.GetComponent<Collider>();
-                if (collider != null) SafeDestroy(collider);
+                // Rounded-rectangle plate (mesh built once the text size is known, so corners stay round)
+                var plate = new GameObject("Backplate");
+                plate.AddComponent<MeshFilter>();
+                var plateRenderer = plate.AddComponent<MeshRenderer>();
                 plate.transform.SetParent(root.transform, false);
                 plate.transform.localPosition = new Vector3(0f, 0f, 0.001f); // just behind the text
-                var plateRenderer = plate.GetComponent<MeshRenderer>();
                 plateRenderer.sharedMaterial = plateMaterial;
                 plateRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 plateRenderer.receiveShadows = false;
@@ -72,6 +71,60 @@ namespace CADInspection.Visualization
             }
 
             return label;
+        }
+
+        private const float CornerRadiusFraction = 0.28f; // corner radius as a share of the plate's shorter side
+        private const int CornerSegments = 6;
+
+        /// <summary>
+        /// Flat rounded rectangle centred on the origin in the XY plane (a convex outline filled as a fan).
+        /// </summary>
+        private static Mesh BuildRoundedRect(float width, float height, float radius)
+        {
+            float hw = width * 0.5f, hh = height * 0.5f;
+            radius = Mathf.Clamp(radius, 0f, Mathf.Min(hw, hh));
+
+            // Corner centres in counter-clockwise order starting top-right, each sweeping 90°
+            var centres = new[]
+            {
+                new Vector2( hw - radius,  hh - radius),
+                new Vector2(-hw + radius,  hh - radius),
+                new Vector2(-hw + radius, -hh + radius),
+                new Vector2( hw - radius, -hh + radius)
+            };
+
+            var vertices = new System.Collections.Generic.List<Vector3> { Vector3.zero };
+            for (int c = 0; c < 4; c++)
+            {
+                float start = c * 90f;
+                for (int s = 0; s <= CornerSegments; s++)
+                {
+                    float a = (start + 90f * s / CornerSegments) * Mathf.Deg2Rad;
+                    vertices.Add(new Vector3(centres[c].x + Mathf.Cos(a) * radius, centres[c].y + Mathf.Sin(a) * radius, 0f));
+                }
+            }
+
+            int outline = vertices.Count - 1;
+            var triangles = new int[outline * 3];
+            for (int i = 0; i < outline; i++)
+            {
+                // clockwise when seen from the camera (which looks along +Z at the label)
+                triangles[i * 3] = 0;
+                triangles[i * 3 + 1] = 1 + (i + 1) % outline;
+                triangles[i * 3 + 2] = 1 + i;
+            }
+
+            var mesh = new Mesh { name = "RoundedPlate" };
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private void OnDestroy()
+        {
+            var filter = m_Plate != null ? m_Plate.GetComponent<MeshFilter>() : null;
+            if (filter != null && filter.sharedMesh != null) SafeDestroy(filter.sharedMesh);
         }
 
         private static void SafeDestroy(Object obj)
@@ -108,7 +161,11 @@ namespace CADInspection.Visualization
                 Bounds b = m_TextRenderer.localBounds;
                 if (b.size.x > 0f && b.size.y > 0f)
                 {
-                    m_Plate.localScale = new Vector3(b.size.x + PlatePaddingMeters * 2f, b.size.y + PlatePaddingMeters * 2f, 1f);
+                    float w = b.size.x + PlatePaddingMeters * 3f;
+                    float h = b.size.y + PlatePaddingMeters * 2f;
+                    var filter = m_Plate.GetComponent<MeshFilter>();
+                    filter.sharedMesh = BuildRoundedRect(w, h, Mathf.Min(w, h) * CornerRadiusFraction);
+                    m_Plate.localScale = Vector3.one;
                     m_Plate.localPosition = new Vector3(b.center.x, b.center.y, 0.001f);
                     m_PlateRenderer.enabled = true;
                     m_PlateFitted = true;

@@ -34,6 +34,76 @@ namespace CADInspection.UI
                 m_Tracker = FindFirstObjectByType<NoteMarkerTracker>();
 
             AutoWireMissingControls();
+            EnsureCloseButton();
+        }
+
+        private const string CloseButtonName = "CloseAppButton";
+
+        /// <summary>
+        /// Adds an EXIT button at the right end of the header bar (created at runtime, so the scene is unchanged).
+        /// </summary>
+        private void EnsureCloseButton()
+        {
+            Transform header = transform.Find("AlignmentPanel/HeaderBar");
+            Transform parent = header != null ? header : transform;
+            if (parent.Find(CloseButtonName) != null) return;
+
+            var buttonObj = new GameObject(CloseButtonName, typeof(RectTransform), typeof(Image), typeof(Button));
+            var rect = (RectTransform)buttonObj.transform;
+            rect.SetParent(parent, false);
+            if (header != null)
+            {
+                // full header height (minus a small margin), fixed width, pinned to the right edge
+                rect.anchorMin = new Vector2(1f, 0f);
+                rect.anchorMax = new Vector2(1f, 1f);
+                rect.pivot = new Vector2(1f, 0.5f);
+                rect.sizeDelta = new Vector2(150f, -16f);
+                rect.anchoredPosition = new Vector2(-12f, 0f);
+            }
+            else
+            {
+                rect.anchorMin = rect.anchorMax = new Vector2(1f, 1f);
+                rect.pivot = new Vector2(1f, 1f);
+                rect.sizeDelta = new Vector2(150f, 80f);
+                rect.anchoredPosition = new Vector2(-12f, -12f);
+            }
+
+            var image = buttonObj.GetComponent<Image>();
+            image.color = new Color(0.80f, 0.22f, 0.22f, 0.95f);
+
+            var labelObj = new GameObject("Label", typeof(RectTransform), typeof(Text));
+            var labelRect = (RectTransform)labelObj.transform;
+            labelRect.SetParent(rect, false);
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = labelRect.offsetMax = Vector2.zero;
+
+            var label = labelObj.GetComponent<Text>();
+            label.text = "EXIT";
+            label.font = m_StatusText != null && m_StatusText.font != null
+                ? m_StatusText.font
+                : Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            label.fontStyle = FontStyle.Bold;
+            label.alignment = TextAnchor.MiddleCenter;
+            label.color = Color.white;
+            label.resizeTextForBestFit = true;
+            label.resizeTextMinSize = 14;
+            label.resizeTextMaxSize = 36;
+            label.raycastTarget = false;
+
+            var button = buttonObj.GetComponent<Button>();
+            button.targetGraphic = image;
+            button.onClick.AddListener(QuitApplication);
+        }
+
+        private static void QuitApplication()
+        {
+            Debug.Log("[NoteMarkerHUD] EXIT pressed - closing the application.");
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.isPlaying = false;
+#else
+            Application.Quit();
+#endif
         }
 
         private void AutoWireMissingControls()

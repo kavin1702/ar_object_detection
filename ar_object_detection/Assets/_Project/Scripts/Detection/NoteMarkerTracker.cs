@@ -337,16 +337,20 @@ namespace CADInspection.Detection
             }
         }
 
-        // After LOCK the outline is fixed in AR space. On plain/glossy floors ARCore tracking drifts a little,
-        // so a fixed object slides against the real notebook as the phone moves. While the notebook is in
-        // view, pull the outline back onto it: small steps, no reaction to tiny noise, ignore big jumps.
-        private const float RefineBlend = 0.25f;          // fraction of the error corrected per detection (~1 s to settle)
-        private const float RefineDeadZoneMeters = 0.004f;
-        private const float RefineDeadZoneDegrees = 1.5f;
-        private const float RefineMaxJumpMeters = 0.12f;   // larger = probably another object or a bad frame
-        private const float RefineMaxJumpDegrees = 30f;
+        // After LOCK the outline stays FROZEN on its anchor. Small differences are never corrected (that is what
+        // made it wobble). Only if the detector keeps seeing the notebook clearly off for a full second
+        // (real AR drift, > 2.5 cm or > 6°) is it moved once, smoothly, and then frozen again.
+        private const float DriftMeters = 0.025f;
+        private const float DriftDegrees = 6f;
+        private const float DriftConfirmSeconds = 1.0f;
+        private const float IgnoreBeyondMeters = 0.12f;    // larger = probably another object or a bad frame
+        private const float IgnoreBeyondDegrees = 30f;
+        private const float GlideSpeed = 6f;               // ~0.5 s glide when a drift correction happens
         private int m_LastRefineSample = -1;
         private bool m_LockedOnImage;
+        private float m_DriftSince = -1f;
+        private bool m_Gliding;
+        private Pose m_GlideTarget;
 
         private void RefineLockedOutline()
         {
@@ -356,24 +360,50 @@ namespace CADInspection.Detection
             Transform root = m_OutlineRenderer.OutlineRoot;
             if (root == null) return;
 
-            // Use each new detection once
-            if (m_ColorDetector.FoundCount == m_LastRefineSample) return;
-            if (!m_ColorDetector.TryGetFreshPose(out Pose detected, out _)) return;
+            if (m_Gliding)
+            {
+                float k = 1f - Mathf.Exp(-GlideSpeed * Time.deltaTime);
+                root.SetPositionAndRotation(
+                    Vector3.Lerp(root.position, m_GlideTarget.position, k),
+                    Quaternion.Slerp(root.rotation, m_GlideTarget.rotation, k));
+                if (Vector3.Distance(root.position, m_GlideTarget.position) < 0.001f &&
+                    Quaternion.Angle(root.rotation, m_GlideTarget.rotation) < 0.3f)
+                {
+                    root.SetPositionAndRotation(m_GlideTarget.position, m_GlideTarget.rotation);
+                    m_Gliding = false;
+                }
+                return;
+            }
+
+            // Only look at new, steady readings
+            if (m_ColorDetector.IsCameraMoving || m_ColorDetector.FoundCount == m_LastRefineSample) return;
+            if (!m_ColorDetector.TryGetFreshPose(out Pose detected, out _)) { m_DriftSince = -1f; return; }
             m_LastRefineSample = m_ColorDetector.FoundCount;
 
-            // Keep the user's rotate offset, and don't let the outline flip 180° (labels would jump edges)
+            // Keep the user's rotate offset, and never flip 180° (labels would jump edges)
             Quaternion target = detected.rotation * Quaternion.Euler(0f, m_CurrentYaw, 0f);
             Quaternion flipped = target * Quaternion.Euler(0f, 180f, 0f);
             if (Quaternion.Angle(root.rotation, flipped) < Quaternion.Angle(root.rotation, target)) target = flipped;
 
             float distance = Vector3.Distance(root.position, detected.position);
             float angle = Quaternion.Angle(root.rotation, target);
-            if (distance > RefineMaxJumpMeters || angle > RefineMaxJumpDegrees) return;
-            if (distance < RefineDeadZoneMeters && angle < RefineDeadZoneDegrees) return;
+            if (distance > IgnoreBeyondMeters || angle > IgnoreBeyondDegrees) { m_DriftSince = -1f; return; }
 
-            root.SetPositionAndRotation(
-                Vector3.Lerp(root.position, detected.position, RefineBlend),
-                Quaternion.Slerp(root.rotation, target, RefineBlend));
+            if (distance > DriftMeters || angle > DriftDegrees)
+            {
+                if (m_DriftSince < 0f) m_DriftSince = Time.unscaledTime;
+                else if (Time.unscaledTime - m_DriftSince >= DriftConfirmSeconds)
+                {
+                    m_GlideTarget = new Pose(detected.position, target);
+                    m_Gliding = true;
+                    m_DriftSince = -1f;
+                    Debug.Log($"[NoteMarkerTracker] Drift corrected after LOCK: {distance * 1000f:F0} mm, {angle:F1}°");
+                }
+            }
+            else
+            {
+                m_DriftSince = -1f; // within tolerance: stay frozen
+            }
         }
 
         /// <summary>
@@ -442,8 +472,10 @@ namespace CADInspection.Detection
             if (m_AlignmentGuideRoot != null)
             {
                 m_AlignmentGuideRoot.SetActive(true);
-                m_AlignmentGuideRoot.transform.position = Vector3.Lerp(m_AlignmentGuideRoot.transform.position, m_CurrentAlignmentPose.position, Time.deltaTime * 22f);
-                m_AlignmentGuideRoot.transform.rotation = Quaternion.Slerp(m_AlignmentGuideRoot.transform.rotation, m_CurrentAlignmentPose.rotation, Time.deltaTime * 22f);
+                // The auto-detected pose is already filtered, so follow it calmly; the free guide follows faster.
+                float follow = 1f - Mathf.Exp(-(m_IsAutoDetected ? 10f : 22f) * Time.deltaTime);
+                m_AlignmentGuideRoot.transform.position = Vector3.Lerp(m_AlignmentGuideRoot.transform.position, m_CurrentAlignmentPose.position, follow);
+                m_AlignmentGuideRoot.transform.rotation = Quaternion.Slerp(m_AlignmentGuideRoot.transform.rotation, m_CurrentAlignmentPose.rotation, follow);
             }
 
             // Dimension callouts only when the box sits on the table (not while it floats in front of the camera)
@@ -530,7 +562,15 @@ namespace CADInspection.Detection
         {
             if (m_IsLocked) return;
 
+            // Lock on the median of the recent steady readings, not on whichever reading came last.
+            if (m_IsAutoDetected && m_ColorDetector != null && m_ColorDetector.TryGetLockPose(out Pose lockPose))
+            {
+                m_CurrentAlignmentPose = new Pose(lockPose.position, lockPose.rotation * Quaternion.Euler(0f, m_CurrentYaw, 0f));
+            }
+
             m_IsLocked = true;
+            m_Gliding = false;
+            m_DriftSince = -1f;
 
             // Clear previous anchors cleanly
             if (m_CurrentAnchor != null)
@@ -740,6 +780,9 @@ namespace CADInspection.Detection
         public void ResetTracking()
         {
             m_IsLocked = false;
+            m_Gliding = false;
+            m_DriftSince = -1f;
+            if (m_ColorDetector != null) m_ColorDetector.ResetFilter();
 
             SafeClearAnchorManagerInstanceIfInvalid();
 

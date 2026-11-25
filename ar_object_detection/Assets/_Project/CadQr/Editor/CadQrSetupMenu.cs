@@ -33,13 +33,15 @@ namespace CADInspection.Editor
         {
             if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
 
+            // New scene first: NewScene unloads unused assets, which would turn the library and materials
+            // loaded below into destroyed (null) references before they are assigned.
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
             ConfigureModelImports();
             CadModelLibrary library = CreateOrUpdateLibrary();
             Material wire = GetOrCreateMaterial("CadWire", new Color(0.1f, 1f, 0.35f, 1f), false);
             Material box = GetOrCreateMaterial("CadBox", new Color(1f, 0.85f, 0.2f, 1f), false);
             Material ghost = GetOrCreateMaterial("CadGhost", new Color(0.25f, 0.75f, 1f, 0.22f), true);
-
-            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
             var light = new GameObject("Directional Light").AddComponent<Light>();
             light.type = LightType.Directional;

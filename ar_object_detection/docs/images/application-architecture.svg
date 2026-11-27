@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">AR Note/Object Detection Application Architecture</title>
+  <desc id="desc">High-level architecture diagram showing mobile AR camera input, AR session, detection, tracking, visualization, UI, and configuration systems.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .panel { fill: #ffffff; stroke: #c9d4e5; stroke-width: 2; rx: 18; }
+      .primary { fill: #e9f7ef; stroke: #25a55f; stroke-width: 2; rx: 16; }
+      .secondary { fill: #eef4ff; stroke: #407ad6; stroke-width: 2; rx: 16; }
+      .accent { fill: #fff4e6; stroke: #d68a1f; stroke-width: 2; rx: 16; }
+      .text { font-family: Arial, Helvetica, sans-serif; fill: #1d2733; }
+      .title { font-size: 30px; font-weight: 700; }
+      .label { font-size: 21px; font-weight: 700; }
+      .small { font-size: 17px; }
+      .arrow { stroke: #53657d; stroke-width: 3; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#53657d"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="720"/>
+  <text class="text title" x="60" y="58">AR Note/Object Detection Application - Overall Design</text>
+
+  <rect class="panel" x="55" y="95" width="250" height="170"/>
+  <text class="text label" x="85" y="140">Mobile User</text>
+  <text class="text small" x="85" y="178">Opens AR app</text>
+  <text class="text small" x="85" y="205">Points camera at object</text>
+  <text class="text small" x="85" y="232">Locks projection</text>
+
+  <rect class="secondary" x="390" y="95" width="330" height="170"/>
+  <text class="text label" x="430" y="140">AR Session System</text>
+  <text class="text small" x="430" y="178">Camera tracking</text>
+  <text class="text small" x="430" y="205">Plane detection</text>
+  <text class="text small" x="430" y="232">Raycast and anchors</text>
+
+  <rect class="primary" x="815" y="95" width="320" height="170"/>
+  <text class="text label" x="855" y="140">Detection System</text>
+  <text class="text small" x="855" y="178">Color-based detection</text>
+  <text class="text small" x="855" y="205">Optional image marker</text>
+  <text class="text small" x="855" y="232">Object pose estimate</text>
+
+  <rect class="accent" x="390" y="330" width="330" height="165"/>
+  <text class="text label" x="430" y="375">Tracking and Locking</text>
+  <text class="text small" x="430" y="413">Alignment guide</text>
+  <text class="text small" x="430" y="440">Manual rotation</text>
+  <text class="text small" x="430" y="467">Stable locked pose</text>
+
+  <rect class="primary" x="815" y="330" width="320" height="165"/>
+  <text class="text label" x="855" y="375">Visualization System</text>
+  <text class="text small" x="855" y="413">3D wireframe outline</text>
+  <text class="text small" x="855" y="440">Dimension arrows</text>
+  <text class="text small" x="855" y="467">Width / Length / Depth labels</text>
+
+  <rect class="secondary" x="55" y="330" width="250" height="165"/>
+  <text class="text label" x="85" y="375">UI System</text>
+  <text class="text small" x="85" y="413">Status messages</text>
+  <text class="text small" x="85" y="440">Rotate / Lock / Rescan</text>
+  <text class="text small" x="85" y="467">Safe mobile layout</text>
+
+  <rect class="panel" x="260" y="570" width="680" height="95"/>
+  <text class="text label" x="300" y="612">Configuration Profile</text>
+  <text class="text small" x="300" y="642">Object name, marker image, dimensions, detection color, outline style, optional model</text>
+
+  <path class="arrow" d="M305 180 H385"/>
+  <path class="arrow" d="M720 180 H810"/>
+  <path class="arrow" d="M975 265 V323"/>
+  <path class="arrow" d="M815 414 H725"/>
+  <path class="arrow" d="M390 414 H310"/>
+  <path class="arrow" d="M555 265 V323"/>
+  <path class="arrow" d="M600 570 V505"/>
+  <path class="arrow" d="M740 618 C900 610 970 535 975 500"/>
+  <path class="arrow" d="M460 618 C265 600 185 535 180 500"/>
+</svg>
